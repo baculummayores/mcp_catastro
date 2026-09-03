@@ -9,7 +9,8 @@
 ## 🚀 Instalación y Configuración
 
 ### 📋 Prerrequisitos
-- Python 3.11+
+- Python 3.14
+- uv 0.9.7+
 - Claude Code instalado
 
 ### 🔧 Instalación
@@ -17,7 +18,7 @@
 1. **Instalar dependencias:**
 ```powershell
 cd C:\Users\Pablo\Desktop\obratec_app\mcp_catastro
-pip install -r requirements.txt
+uv sync --locked
 ```
 
 2. **Configurar entorno (opcional):**
@@ -28,7 +29,7 @@ cp .env.example .env
 
 3. **Ejecutar servidor MCP:**
 ```powershell
-python mcp_server.py
+uv run --locked python mcp_server.py
 ```
 
 4. **Configurar Claude Code:**
@@ -37,7 +38,7 @@ python mcp_server.py
 claude --mcp-config claude-config.json
 
 # Opción B: Configuración directa
-claude --mcp-config '{"mcpServers":{"catastro":{"command":"python","args":["C:\\Users\\Pablo\\Desktop\\obratec_app\\mcp_catastro\\mcp_server.py"],"transport":"stdio"}}}'
+claude --mcp-config claude-config.json
 ```
 
 ---
@@ -208,20 +209,20 @@ Bilbao:           43.2627, -2.9253
 
 | Error | Causa | Solución |
 |-------|-------|----------|
-| `Bibliotecas MCP no encontradas` | `mcp` no instalado | `pip install mcp` |
+| `uv.lock` ausente o desactualizado | El entorno no coincide | Ejecutar `uv lock` y revisar el cambio |
 | `Referencia catastral inválida` | Formato incorrecto | Verificar 20 caracteres y patrón |
 | `Coordenadas fuera de rango` | No están en España | Usar rangos válidos |
 | `Servicio no disponible` | Catastro caído | Reintentar más tarde |
-| `Timeout` | Respuesta lenta | Aumentar `CATASTRO_TIMEOUT` en `.env` |
+| `Timeout` | Respuesta lenta | Aumentar `CATASTRO_CATASTRO_TIMEOUT` en `.env` |
 
 ### **Diagnóstico:**
 
 ```powershell
 # Probar conectividad
-python scripts/test-connection.py
+uv run --locked python tests/test-startup.py
 
 # Verificar configuración
-python -c "from config.settings import get_settings; print(get_settings().catastro_base_url)"
+uv run --locked python -c "from config.settings import get_settings; print(get_settings().catastro_base_url)"
 
 # Debug mode
 # En .env: CATASTRO_DEBUG=true
@@ -234,17 +235,17 @@ python -c "from config.settings import get_settings; print(get_settings().catast
 ### **Pruebas Rápidas:**
 ```powershell
 # Test completo de conectividad
-python scripts/test-connection.py
+uv run --locked python tests/test-startup.py
 
 # Tests unitarios
-pytest tests/ -v
+uv run --locked pytest -q
 
 # Test específico de validación
-pytest tests/test_catastro.py::TestReferenciaCatastral -v
+uv run --locked pytest -q
 ```
 
 ### **Verificar que todo funciona:**
-1. `python mcp_server.py` (debe iniciar sin errores)
+1. `uv run --locked python mcp_server.py` (debe iniciar sin errores)
 2. En otra terminal: `claude --mcp-config claude-config.json`
 3. Preguntar a Claude: "Valida la referencia 2749704YJ0624N0001DI"
 
@@ -257,10 +258,8 @@ pytest tests/test_catastro.py::TestReferenciaCatastral -v
 # Configuración básica
 CATASTRO_DEBUG=true                    # Activar logs detallados
 CATASTRO_LOG_LEVEL=DEBUG               # Nivel de logging
+CATASTRO_LOG_SENSITIVE_DATA=false      # No exponer datos catastrales
 CATASTRO_CATASTRO_TIMEOUT=60           # Timeout en segundos
-
-# Rate limiting
-CATASTRO_MAX_REQUESTS_PER_MINUTE=30    # Reducir si hay problemas
 
 # OpenAI (opcional)
 CATASTRO_OPENAI_API_KEY=sk-xxx         # Tu API key
@@ -269,11 +268,11 @@ CATASTRO_OPENAI_MODEL=gpt-3.5-turbo    # Modelo a usar
 
 ### **Personalización de Logs:**
 ```bash
-# Crear logs más detallados
+# Logs operativos detallados, siempre por stderr
 CATASTRO_LOG_LEVEL=DEBUG
 
-# Los logs se guardan en:
-logs/catastro_mcp.log
+# Solo en un diagnóstico controlado, habilitar además datos sensibles
+CATASTRO_LOG_SENSITIVE_DATA=true
 ```
 
 ---
@@ -293,39 +292,39 @@ R: No, solo España y territorios españoles
 R: El modo simulado es gratis. OpenAI requiere API key de pago.
 
 **P: ¿Hay límites de consultas?**
-R: Sí, 60 por minuto por defecto. Configurable en `.env`.
+R: El proyecto no aplica actualmente un rate limit propio. Evita cargas intensivas y respeta las condiciones del servicio oficial.
 
 **P: ¿Cómo sé si está funcionando?**
-R: Ejecuta `python scripts/test-connection.py` para verificar.
+R: Ejecuta `uv run --locked python tests/test-startup.py` para verificar.
 
 ---
 
 ## 🆘 Soporte y Ayuda
 
 ### **Recursos:**
-- **Logs:** `logs/catastro_mcp.log`
+- **Logs:** `stderr` del proceso MCP
 - **Config:** `claude-config.json`
-- **Tests:** `python scripts/test-connection.py`
+- **Tests:** `uv run --locked pytest -q`
 - **Docs:** Carpeta `docs/`
 
 ### **Comandos Útiles:**
 ```powershell
 # Verificar instalación
-python -c "import mcp; print('MCP OK')"
+uv run --locked python -c "import mcp; print('MCP OK')"
 
 # Ver configuración actual
-python -c "from config.settings import get_settings; s=get_settings(); print(f'URL: {s.catastro_base_url}')"
+uv run --locked python -c "from config.settings import get_settings; s=get_settings(); print(f'URL: {s.catastro_base_url}')"
 
 # Test rápido de referencia
-python -c "from models.catastro_models import ReferenciaCatastral; print(ReferenciaCatastral.validar_formato_estatico('2749704YJ0624N0001DI'))"
+uv run --locked python -c "from models.catastro_models import ReferenciaCatastral; print(ReferenciaCatastral.validar_formato_estatico('2749704YJ0624N0001DI'))"
 ```
 
 ---
 
 ## 🎉 ¡Todo Listo!
 
-1. `pip install -r requirements.txt`
-2. `python mcp_server.py`  
+1. `uv sync --locked`
+2. `uv run --locked python mcp_server.py`
 3. `claude --mcp-config claude-config.json`
 4. **Pregunta a Claude sobre cualquier referencia catastral**
 

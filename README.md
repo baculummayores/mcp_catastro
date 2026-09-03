@@ -1,7 +1,7 @@
 # 🏠 MCP Catastro España - Servidor MCP Oficial
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![MCP Compatible](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
+[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
+[![MCP SDK v2](https://img.shields.io/badge/MCP%20SDK-v2-green.svg)](https://modelcontextprotocol.io/)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-ready-purple.svg)](https://claude.ai/code)
 [![Catastro España](https://img.shields.io/badge/Catastro-España-red.svg)](https://sede.catastro.gob.es/)
 
@@ -9,7 +9,7 @@
 
 ## ✨ Características Principales
 
-- 🔌 **Servidor MCP 100% oficial** - Compatible con Claude Code
+- 🔌 **MCP Python SDK v2** - `MCPServer`, salida estructurada y validación automática
 - 🏛️ **API oficial del Catastro** - Endpoints WCF del gobierno español  
 - 🏢 **División horizontal** - Consulta parcelas con múltiples inmuebles
 - 🧠 **Resúmenes IA** con OpenAI o simulación local
@@ -38,7 +38,8 @@ mcp_catastro/
 ├── 🧪 tests/                     # Tests automatizados
 ├── 📖 docs/                      # Documentación completa
 ├── 📄 Guia_Completa_API_Catastro.md  # Documentación API oficial
-├── 📋 requirements.txt           # 6 dependencias esenciales
+├── 📋 pyproject.toml            # Dependencias directas y herramientas
+├── 🔒 uv.lock                   # Resolución universal reproducible
 └── 🛠️ setup-env.ps1              # Script configuración automática
 ```
 
@@ -48,7 +49,8 @@ mcp_catastro/
 
 ### 📋 Prerrequisitos
 
-- **Python 3.11+**
+- **Python 3.14**
+- **uv 0.9.7+**
 - **Claude Code** instalado
 - **Windows/Linux/macOS**
 
@@ -69,15 +71,33 @@ claude --mcp-config claude-config.json
 ### 🔧 Setup Manual
 
 ```bash
-# Instalar dependencias
-pip install -r requirements.txt
+# Instalar exactamente las versiones bloqueadas
+uv sync --locked
 
 # Ejecutar servidor MCP
-python mcp_server.py
+uv run --locked python mcp_server.py
 
 # En otra terminal, configurar Claude Code
 claude --mcp-config claude-config.json
 ```
+
+El proyecto requiere Python 3.14 (`>=3.14,<3.15`) y usa el transporte
+`stdio` por defecto. La API v1 del SDK (`Server` con decoradores de bajo nivel e
+`InitializationOptions` manual) ya no se utiliza.
+
+Para habilitar la integración opcional con OpenAI usa
+`uv sync --locked --extra openai`. No edites `uv.lock` manualmente; actualiza
+`pyproject.toml` y ejecuta `uv lock` cuando quieras cambiar dependencias.
+
+### Verificación
+
+```bash
+uv run --locked pytest -q
+```
+
+Las pruebas MCP usan el cliente oficial en memoria, negocian la versión de
+protocolo vigente y comprueban herramientas, esquemas, salida estructurada y
+recursos sin realizar llamadas externas al Catastro.
 
 ---
 
@@ -207,8 +227,8 @@ Año construcción: 2013
 - ✅ **JSON nativo** - Respuestas JSON del Catastro
 - ✅ **Fallback XML** - Compatibilidad total
 - ✅ **Reintentos automáticos** - Manejo robusto de errores
-- ✅ **Rate limiting** - 60 consultas/minuto
 - ✅ **Timeout configurable** - 30 segundos por defecto
+- ⚠️ **Sin rate limiting, caché ni métricas internas** - Capacidades previstas en el roadmap
 
 ---
 
@@ -284,8 +304,9 @@ Superficie adecuada para comercio especializado.
 |----------|-------------|-------------------|
 | `CATASTRO_DEBUG` | Modo debug detallado | `false` |
 | `CATASTRO_LOG_LEVEL` | Nivel de logging | `INFO` |
-| `CATASTRO_TIMEOUT` | Timeout API (segundos) | `30` |
-| `CATASTRO_MAX_REQUESTS_PER_MINUTE` | Rate limit | `60` |
+| `CATASTRO_LOG_SENSITIVE_DATA` | Permitir datos sensibles en logs DEBUG | `false` |
+| `CATASTRO_CATASTRO_TIMEOUT` | Timeout API (segundos) | `30` |
+| `CATASTRO_CATASTRO_MAX_RETRIES` | Reintentos ante fallos transitorios | `3` |
 | `CATASTRO_OPENAI_API_KEY` | Clave OpenAI (opcional) | `None` |
 | `CATASTRO_OPENAI_MODEL` | Modelo OpenAI | `gpt-4` |
 
@@ -295,11 +316,9 @@ Superficie adecuada para comercio especializado.
 # Configuración básica
 CATASTRO_DEBUG=false
 CATASTRO_LOG_LEVEL=INFO
-CATASTRO_TIMEOUT=30
-
-# Rate limiting
-CATASTRO_MAX_REQUESTS_PER_MINUTE=60
-CATASTRO_MAX_REQUESTS_PER_HOUR=1000
+CATASTRO_LOG_SENSITIVE_DATA=false
+CATASTRO_CATASTRO_TIMEOUT=30
+CATASTRO_CATASTRO_MAX_RETRIES=3
 
 # OpenAI (opcional)
 CATASTRO_OPENAI_API_KEY=tu_api_key_aqui
@@ -318,20 +337,20 @@ CATASTRO_OPENAI_TEMPERATURE=0.3
 python -c "import asyncio; from services.catastro_service import CatastroService; asyncio.run(CatastroService().consultar_por_referencia('2314501EG1421S0001KJ'))"
 
 # Tests unitarios completos
-pytest tests/ -v --cov=services --cov=models
+uv run --locked pytest --cov=services --cov=models --cov=mcp_server
 
 # Test específico de referencias
-pytest tests/test-validacion-simple.py -v
+uv run --locked pytest -q
 
 # Test manual interactivo
-python tests/test-manual.py
+uv run --locked python tests/test-manual.py
 ```
 
 ### 🎯 **Cobertura de Tests**
 
 - ✅ **Validación de referencias** - Formatos 14 y 20 caracteres
 - ✅ **Servicios de consulta** - Mocks y endpoints reales  
-- ✅ **Manejo de errores** - Timeouts, 404, rate limiting
+- ✅ **Manejo de errores** - Timeouts y respuestas HTTP erróneas
 - ✅ **Parsing JSON/XML** - Respuestas del Catastro
 - ✅ **División horizontal** - Múltiples inmuebles
 - ✅ **Coordenadas GPS** - Validación rangos España
@@ -347,21 +366,20 @@ python tests/test-manual.py
 | `Referencia catastral inválida` | Formato incorrecto | Verificar 20 chars alfanuméricos |
 | `Coordenadas fuera de rango` | No están en España | Usar 35-44°N, -10-5°E |
 | `Servicio no disponible` | Catastro en mantenimiento | Reintentar en unos minutos |
-| `Timeout` | Respuesta muy lenta | Aumentar `CATASTRO_TIMEOUT` |
-| `Rate limit exceeded` | Demasiadas consultas | Esperar 1 minuto |
+| `Timeout` | Respuesta muy lenta | Aumentar `CATASTRO_CATASTRO_TIMEOUT` |
 
 ### **Diagnóstico**
 
 ```bash
-# Verificar logs
-tail -f logs/catastro_mcp.log
-
 # Test de conectividad
-python -c "import httpx; print(httpx.get('https://ovc.catastro.meh.es').status_code)"
+uv run --locked python -c "import httpx; print(httpx.get('https://ovc.catastro.meh.es').status_code)"
 
-# Debug modo completo
-export CATASTRO_DEBUG=true
-python mcp_server.py
+# Debug operativo sin datos catastrales
+export CATASTRO_LOG_LEVEL=DEBUG
+uv run --locked python mcp_server.py
+
+# Opt-in explícito para datos sensibles (solo diagnóstico controlado)
+export CATASTRO_LOG_SENSITIVE_DATA=true
 ```
 
 ---
@@ -407,7 +425,7 @@ git clone https://github.com/CabhuDev/mcp_Catastro.git
 git checkout -b feature/nueva-funcionalidad
 
 # Hacer cambios y tests
-pytest tests/ -v
+uv run --locked pytest -q
 
 # Commit y push
 git commit -m "feat: añadir nueva funcionalidad"
@@ -417,7 +435,7 @@ git push origin feature/nueva-funcionalidad
 ```
 
 ### **Estándares de Código**
-- ✅ **Python 3.11+** - Tipado moderno
+- ✅ **Python 3.14** - Runtime único soportado
 - ✅ **Pydantic V2** - Validación de datos
 - ✅ **Black + isort** - Formato de código
 - ✅ **Pytest** - Tests unitarios
@@ -437,7 +455,7 @@ git push origin feature/nueva-funcionalidad
 ### 📚 **v2.0.0 - MCP Puro**
 - ✅ Eliminado FastAPI y Docker (innecesarios)
 - ✅ MCP 100% real con protocolo stdio
-- ✅ Dependencias mínimas (6 esenciales)
+- ✅ Dependencias bloqueadas con `uv.lock`
 - ✅ Optimizado para Claude Code
 
 ### 🎯 **v1.0.0 - API Oficial**
@@ -457,8 +475,8 @@ git push origin feature/nueva-funcionalidad
 
 - **Issues:** [GitHub Issues](https://github.com/CabhuDev/mcp_Catastro/issues)
 - **Documentación:** [`docs/`](docs/)
-- **Tests:** `python tests/test-manual.py`
-- **Logs:** `logs/catastro_mcp.log`
+- **Tests:** `uv run --locked pytest -q`
+- **Logs:** `stderr` del proceso MCP
 
 ---
 

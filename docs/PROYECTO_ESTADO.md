@@ -25,7 +25,6 @@
 - **CONSULTA_RCCOOR** - Consultas por coordenadas GPS
 - **Parsing dual** - Manejo automático de estructuras JSON diferentes
 - **Fallback XML** - Compatibilidad total con respuestas XML
-- **Rate limiting** - 60 consultas/minuto
 - **Reintentos automáticos** - Manejo robusto de errores
 
 ### ✅ **Sistema de IA Integrado**
@@ -68,7 +67,8 @@ mcp_catastro/
 ├── 🧪 tests/                     # Tests automatizados (✅ FUNCIONANDO)
 ├── 📖 docs/                      # Documentación (✅ ACTUALIZADO)
 ├── 📄 Guia_Completa_API_Catastro.md  # Doc API oficial (✅ COMPLETO)
-├── 📋 requirements.txt           # 6 dependencias esenciales (✅ OPTIMIZADO)
+├── 📋 pyproject.toml            # Dependencias directas (✅ ACTUALIZADO)
+├── 🔒 uv.lock                   # Lock universal reproducible (✅ ACTUALIZADO)
 └── 🛠️ setup-env.ps1              # Setup automático (✅ COMPLETO)
 ```
 
@@ -83,7 +83,7 @@ mcp_catastro/
 python -c "import asyncio; from services.catastro_service import CatastroService; asyncio.run(CatastroService().consultar_por_referencia('2314501EG1421S0001KJ'))"
 
 # ✅ Servidor MCP funcional
-python mcp_server.py  # Se inicia correctamente
+uv run --locked python mcp_server.py  # Se inicia correctamente
 
 # ✅ Herramientas MCP disponibles
 # - 6 herramientas registradas y funcionando
@@ -111,7 +111,7 @@ python mcp_server.py  # Se inicia correctamente
 ### **Código**
 - **Líneas de código:** ~2,000 líneas Python
 - **Archivos Python:** 8 archivos principales
-- **Dependencias:** 6 esenciales + 6 desarrollo
+- **Dependencias:** Bloqueadas de forma reproducible con uv
 - **Cobertura tests:** Funcional (manual verificado)
 
 ### **Documentación**
@@ -149,7 +149,7 @@ python mcp_server.py  # Se inicia correctamente
 ✅ LICENSE                (MIT License)
 ✅ .gitignore             (Configuración Git completa)
 ✅ .env.example           (Configuración ejemplo)
-✅ requirements.txt       (Dependencias optimizadas)
+✅ pyproject.toml / uv.lock (Dependencias reproducibles)
 ✅ setup-env.ps1          (Setup automático Windows)
 ✅ claude-config.json     (Configuración Claude Code)
 ✅ Guia_Completa_API_Catastro.md  (Documentación API)
@@ -169,7 +169,7 @@ python mcp_server.py  # Se inicia correctamente
 ### 🏛️ **API Oficial Catastro**
 - **Endpoints gubernamentales** verificados y funcionando
 - **Parsing inteligente** - Manejo automático de estructuras diferentes
-- **Rate limiting** - Respeto de límites oficiales
+- **Reintentos y timeouts** configurables
 
 ### 🧠 **IA Integrada**
 - **Modo gratuito** sin dependencias externas
@@ -186,8 +186,8 @@ python mcp_server.py  # Se inicia correctamente
 ## 📈 **Roadmap Futuro (Post GitHub)**
 
 ### **v3.1.0 - Optimización**
-- Cache inteligente para consultas frecuentes
-- Métricas avanzadas y monitoreo
+- Caché inteligente para consultas frecuentes
+- Métricas, rate limiting y monitoreo
 - Búsqueda por provincia/municipio
 
 ### **v3.2.0 - Exportación**
