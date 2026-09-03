@@ -2,6 +2,7 @@
 
 import asyncio
 
+import httpx
 import pytest
 
 from mcp_server import app, app_lifespan
@@ -35,5 +36,23 @@ def test_xml_parser_rejects_entities() -> None:
                 service._parsear_respuesta_xml(malicious_xml)
         finally:
             await service.aclose()
+
+    asyncio.run(run())
+
+
+def test_catastro_query_with_mock_transport() -> None:
+    async def run() -> None:
+        reference = "2314501EG1421S0001KJ"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["RefCat"] == reference
+            return httpx.Response(200, json={"consulta_dnprcResult": {}}, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            service = CatastroService(http_client=http_client)
+            result = await service.consultar_por_referencia(reference)
+
+        assert result.referencia_catastral == reference
+        assert result.estado_consulta == "sin_datos"
 
     asyncio.run(run())

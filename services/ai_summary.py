@@ -84,7 +84,10 @@ class AIService:
                 temperature=self.settings.openai_temperature,
             )
 
-            resumen = response.choices[0].message.content.strip()
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                raise ValueError("OpenAI devolvió una respuesta sin contenido")
+            resumen = content.strip()
             logger.info("Resumen generado con OpenAI")
             log_sensitive(
                 logger,
