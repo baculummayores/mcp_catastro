@@ -19,7 +19,18 @@ settings = get_settings()
 catastro_service = CatastroService()
 ai_service = AIService()
 
-READ_ONLY_TOOL = ToolAnnotations(read_only_hint=True, idempotent_hint=True)
+EXTERNAL_READ_ONLY_TOOL = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+LOCAL_READ_ONLY_TOOL = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 app = MCPServer(
     "catastro-mcp",
@@ -119,7 +130,7 @@ def parse_direccion_completa(direccion: str) -> dict[str, Any]:
         }
 
 
-@app.tool(title="Consultar inmueble por referencia", annotations=READ_ONLY_TOOL)
+@app.tool(title="Consultar inmueble por referencia", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_catastro_por_referencia(
     referencia: Annotated[
         str,
@@ -135,7 +146,7 @@ async def consultar_catastro_por_referencia(
     return resultado.model_dump(mode="json")
 
 
-@app.tool(title="Consultar inmueble por coordenadas", annotations=READ_ONLY_TOOL)
+@app.tool(title="Consultar inmueble por coordenadas", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_catastro_por_coordenadas(
     latitud: Annotated[
         float, Field(ge=35.0, le=44.0, description="Latitud WGS84 en grados decimales.")
@@ -150,7 +161,7 @@ async def consultar_catastro_por_coordenadas(
     return resultado.model_dump(mode="json")
 
 
-@app.tool(title="Generar resumen catastral", annotations=READ_ONLY_TOOL)
+@app.tool(title="Generar resumen catastral", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def generar_resumen_ia(
     referencia: Annotated[
         str,
@@ -172,7 +183,7 @@ async def generar_resumen_ia(
     return await ai_service.generar_resumen(referencia, usar_openai, idioma)
 
 
-@app.tool(title="Validar referencia catastral", annotations=READ_ONLY_TOOL)
+@app.tool(title="Validar referencia catastral", annotations=LOCAL_READ_ONLY_TOOL)
 def validar_referencia_catastral(
     referencia: Annotated[
         str,
@@ -192,7 +203,7 @@ def validar_referencia_catastral(
     }
 
 
-@app.tool(title="Información de búsqueda por dirección", annotations=READ_ONLY_TOOL)
+@app.tool(title="Información de búsqueda por dirección", annotations=LOCAL_READ_ONLY_TOOL)
 async def buscar_catastro_por_direccion(
     direccion_completa: Annotated[
         str,
@@ -228,7 +239,7 @@ async def buscar_catastro_por_direccion(
     return resultado.model_dump(mode="json")
 
 
-@app.tool(title="Consultar parcela", annotations=READ_ONLY_TOOL)
+@app.tool(title="Consultar parcela", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_parcela_por_codigo(
     codigo_parcela: Annotated[
         str,

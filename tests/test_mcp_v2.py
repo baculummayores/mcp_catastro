@@ -28,7 +28,22 @@ def test_mcp_v2_tools_and_resource() -> None:
                 ]
                 == 14
             )
-            assert tools["consultar_catastro_por_coordenadas"].annotations.read_only_hint
+            external_tools = {
+                "consultar_catastro_por_referencia",
+                "consultar_catastro_por_coordenadas",
+                "generar_resumen_ia",
+                "consultar_parcela_por_codigo",
+            }
+            local_tools = {
+                "validar_referencia_catastral",
+                "buscar_catastro_por_direccion",
+            }
+            for tool_name in external_tools | local_tools:
+                annotations = tools[tool_name].annotations
+                assert annotations.read_only_hint is True
+                assert annotations.destructive_hint is False
+                assert annotations.idempotent_hint is True
+                assert annotations.open_world_hint is (tool_name in external_tools)
             assert all(tool.output_schema for tool in tools.values())
 
             result = await client.call_tool(
