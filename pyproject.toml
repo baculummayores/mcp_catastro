@@ -25,7 +25,7 @@ dev = [
 ]
 security = [
     "bandit>=1.7",
-    "safety>=3",
+    "pip-audit>=2.9",
 ]
 
 [tool.uv]
