@@ -2,9 +2,14 @@
 """Servidor MCP v2 para consultar el Catastro de España."""
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
+import httpx
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -16,8 +21,26 @@ from services.catastro_service import CatastroService
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-catastro_service = CatastroService()
-ai_service = AIService()
+
+
+@dataclass(frozen=True)
+class AppContext:
+    """Recursos compartidos durante la vida del servidor MCP."""
+
+    catastro_service: CatastroService
+    ai_service: AIService
+
+
+@asynccontextmanager
+async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
+    """Crea una única conexión HTTP reutilizable y garantiza su cierre."""
+    async with httpx.AsyncClient(timeout=settings.catastro_timeout) as http_client:
+        catastro_service = CatastroService(http_client=http_client)
+        yield AppContext(
+            catastro_service=catastro_service,
+            ai_service=AIService(catastro_service=catastro_service),
+        )
+
 
 EXTERNAL_READ_ONLY_TOOL = ToolAnnotations(
     read_only_hint=True,
@@ -42,6 +65,7 @@ app = MCPServer(
         "la API pública del Catastro no la ofrece de forma fiable."
     ),
     version=settings.app_version,
+    lifespan=app_lifespan,
 )
 
 
@@ -132,6 +156,7 @@ def parse_direccion_completa(direccion: str) -> dict[str, Any]:
 
 @app.tool(title="Consultar inmueble por referencia", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_catastro_por_referencia(
+    ctx: Context[AppContext],
     referencia: Annotated[
         str,
         Field(
@@ -142,12 +167,17 @@ async def consultar_catastro_por_referencia(
     ],
 ) -> dict[str, Any]:
     """Consulta los datos de un inmueble por su referencia catastral completa."""
-    resultado = await catastro_service.consultar_por_referencia(referencia)
+    resultado = (
+        await ctx.request_context.lifespan_context.catastro_service.consultar_por_referencia(
+            referencia
+        )
+    )
     return resultado.model_dump(mode="json")
 
 
 @app.tool(title="Consultar inmueble por coordenadas", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_catastro_por_coordenadas(
+    ctx: Context[AppContext],
     latitud: Annotated[
         float, Field(ge=35.0, le=44.0, description="Latitud WGS84 en grados decimales.")
     ],
@@ -157,12 +187,17 @@ async def consultar_catastro_por_coordenadas(
     ],
 ) -> dict[str, Any]:
     """Localiza y consulta un inmueble a partir de coordenadas en España."""
-    resultado = await catastro_service.consultar_por_coordenadas(latitud, longitud)
+    resultado = (
+        await ctx.request_context.lifespan_context.catastro_service.consultar_por_coordenadas(
+            latitud, longitud
+        )
+    )
     return resultado.model_dump(mode="json")
 
 
 @app.tool(title="Generar resumen catastral", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def generar_resumen_ia(
+    ctx: Context[AppContext],
     referencia: Annotated[
         str,
         Field(
@@ -180,7 +215,9 @@ async def generar_resumen_ia(
     ] = "es",
 ) -> str:
     """Genera un resumen profesional de los datos catastrales."""
-    return await ai_service.generar_resumen(referencia, usar_openai, idioma)
+    return await ctx.request_context.lifespan_context.ai_service.generar_resumen(
+        referencia, usar_openai, idioma
+    )
 
 
 @app.tool(title="Validar referencia catastral", annotations=LOCAL_READ_ONLY_TOOL)
@@ -205,6 +242,7 @@ def validar_referencia_catastral(
 
 @app.tool(title="Información de búsqueda por dirección", annotations=LOCAL_READ_ONLY_TOOL)
 async def buscar_catastro_por_direccion(
+    ctx: Context[AppContext],
     direccion_completa: Annotated[
         str,
         Field(
@@ -228,7 +266,7 @@ async def buscar_catastro_por_direccion(
             ],
         }
 
-    resultado = await catastro_service.buscar_por_direccion(
+    resultado = await ctx.request_context.lifespan_context.catastro_service.buscar_por_direccion(
         provincia=componentes.get("provincia", ""),
         municipio=componentes.get("municipio", ""),
         tipo_via=componentes.get("tipo_via", "CALLE"),
@@ -241,6 +279,7 @@ async def buscar_catastro_por_direccion(
 
 @app.tool(title="Consultar parcela", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_parcela_por_codigo(
+    ctx: Context[AppContext],
     codigo_parcela: Annotated[
         str,
         Field(
@@ -251,7 +290,11 @@ async def consultar_parcela_por_codigo(
     ],
 ) -> dict[str, Any]:
     """Consulta todos los inmuebles asociados a una parcela catastral."""
-    resultado = await catastro_service.consultar_parcela_por_codigo(codigo_parcela)
+    resultado = (
+        await ctx.request_context.lifespan_context.catastro_service.consultar_parcela_por_codigo(
+            codigo_parcela
+        )
+    )
     return resultado.model_dump(mode="json")
 
 

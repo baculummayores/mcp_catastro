@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 class AIService:
     """Servicio para generar resúmenes con IA de datos catastrales"""
 
-    def __init__(self):
+    def __init__(self, catastro_service: CatastroService | None = None):
         self.settings = get_settings()
-        self.catastro_service = CatastroService()
+        self.catastro_service = catastro_service or CatastroService()
         self._openai_client = None
 
     async def generar_resumen(

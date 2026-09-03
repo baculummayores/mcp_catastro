@@ -76,16 +76,19 @@ def test_service_logs_hide_inputs_and_raw_payload(monkeypatch: pytest.MonkeyPatc
         configure_logging(settings, stream=stream)
         service = CatastroService()
 
-        await service.consultar_por_referencia("PRIVATE-REF-123")
-        await service.buscar_por_direccion(
-            provincia="PROVINCIA PRIVADA",
-            municipio="MUNICIPIO PRIVADO",
-            nombre_via="CALLE PRIVADA",
-            numero="99",
-            direccion_original="CALLE PRIVADA 99, MUNICIPIO PRIVADO, PROVINCIA PRIVADA",
-        )
-        with pytest.raises(ValueError, match="Error parseando respuesta"):
-            service._parsear_respuesta_json("PRIVATE_RAW_PAYLOAD")
+        try:
+            await service.consultar_por_referencia("PRIVATE-REF-123")
+            await service.buscar_por_direccion(
+                provincia="PROVINCIA PRIVADA",
+                municipio="MUNICIPIO PRIVADO",
+                nombre_via="CALLE PRIVADA",
+                numero="99",
+                direccion_original="CALLE PRIVADA 99, MUNICIPIO PRIVADO, PROVINCIA PRIVADA",
+            )
+            with pytest.raises(ValueError, match="Error parseando respuesta"):
+                service._parsear_respuesta_json("PRIVATE_RAW_PAYLOAD")
+        finally:
+            await service.aclose()
 
         output = stream.getvalue()
         assert "Búsqueda informativa por dirección solicitada" in output

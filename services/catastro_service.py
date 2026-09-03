@@ -5,10 +5,11 @@ Servicio principal para consultas al Catastro de España
 import asyncio
 import logging
 import time
-import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
 import httpx
+from defusedxml import ElementTree as ET
+from defusedxml.common import DefusedXmlException
 
 from config.settings import (
     ERROR_MESSAGES,
@@ -32,12 +33,19 @@ logger = logging.getLogger(__name__)
 class CatastroService:
     """Servicio para consultas al Catastro de España"""
 
-    def __init__(self):
+    def __init__(self, http_client: httpx.AsyncClient | None = None):
         self.settings = get_settings()
         self.base_url = self.settings.catastro_base_url
         self.timeout = self.settings.catastro_timeout
         self.max_retries = self.settings.catastro_max_retries
         self.retry_delay = self.settings.catastro_retry_delay
+        self.http_client = http_client or httpx.AsyncClient(timeout=self.timeout)
+        self._owns_http_client = http_client is None
+
+    async def aclose(self) -> None:
+        """Cierra el cliente HTTP cuando el servicio es responsable de él."""
+        if self._owns_http_client:
+            await self.http_client.aclose()
 
     async def consultar_por_referencia(self, referencia: str) -> CatastroResponse:
         """
@@ -59,15 +67,11 @@ class CatastroService:
             # Realizar consulta a la nueva API WCF
             url = f"{self.base_url}{CatastroEndpoints.CONSULTA_DNPRC}"
 
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                # Configurar headers para JSON
-                headers = {
-                    "Accept": "application/json",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                }
-                response = await self._realizar_consulta_con_reintentos(
-                    client, url, params, headers
-                )
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            response = await self._realizar_consulta_con_reintentos(url, params, headers)
 
             # Parsear respuesta JSON (la nueva API devuelve JSON)
             datos_parseados = self._parsear_respuesta_json(response.text)
@@ -118,15 +122,11 @@ class CatastroService:
             # Realizar consulta a la nueva API de coordenadas
             url = f"{self.base_url}{CatastroEndpoints.CONSULTA_RCCOOR}"
 
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                # Configurar headers para JSON
-                headers = {
-                    "Accept": "application/json",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                }
-                response = await self._realizar_consulta_con_reintentos(
-                    client, url, params, headers
-                )
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            response = await self._realizar_consulta_con_reintentos(url, params, headers)
 
             # Parsear respuesta JSON
             datos_parseados = self._parsear_respuesta_json(response.text)
@@ -173,7 +173,6 @@ class CatastroService:
 
     async def _realizar_consulta_con_reintentos(
         self,
-        client: httpx.AsyncClient,
         url: str,
         params: Dict[str, str],
         headers: Dict[str, str] = None,
@@ -192,9 +191,9 @@ class CatastroService:
 
                 # Usar GET para la nueva API WCF JSON - funciona con parámetros en URL
                 if headers:
-                    response = await client.get(url, params=params, headers=headers)
+                    response = await self.http_client.get(url, params=params, headers=headers)
                 else:
-                    response = await client.get(url, params=params)
+                    response = await self.http_client.get(url, params=params)
                 response.raise_for_status()
 
                 # Verificar que la respuesta no esté vacía
@@ -281,7 +280,7 @@ class CatastroService:
             # Convertir XML a diccionario
             return self._xml_a_dict(root)
 
-        except ET.ParseError as e:
+        except (ET.ParseError, DefusedXmlException) as e:
             log_failure(
                 logger,
                 logging.ERROR,
@@ -940,14 +939,11 @@ PARA OBTENER EL CODIGO CORRECTO:
 
             url = f"{self.base_url}{CatastroEndpoints.CONSULTA_DNPRC}"
 
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                headers = {
-                    "Accept": "application/json",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                }
-                response = await self._realizar_consulta_con_reintentos(
-                    client, url, params, headers
-                )
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            response = await self._realizar_consulta_con_reintentos(url, params, headers)
 
             # Parsear respuesta JSON
             datos_parseados = self._parsear_respuesta_json(response.text)

@@ -55,6 +55,13 @@ def test_mcp_v2_tools_and_resource() -> None:
             assert result.structured_content["es_valida"] is False
             assert result.structured_content["analisis_detallado"]["longitud"] == 14
 
+            address = await client.call_tool(
+                "buscar_catastro_por_direccion",
+                {"direccion_completa": "CALLE MAYOR 1, MADRID, MADRID"},
+            )
+            assert address.is_error is False
+            assert address.structured_content["estado_consulta"] == "informacion"
+
             invalid = await client.call_tool(
                 "consultar_parcela_por_codigo",
                 {"codigo_parcela": "CORTO"},

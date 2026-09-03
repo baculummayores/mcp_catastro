@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Servidor MCP para consultar el Catastro de España"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "defusedxml>=0.7.1,<1",
     "httpx>=0.25.2,<1",
     "mcp>=2,<3",
     "pydantic>=2.12,<3",
