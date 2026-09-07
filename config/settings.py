@@ -37,6 +37,29 @@ class Settings:
         self.catastro_max_retries = int(os.getenv("CATASTRO_CATASTRO_MAX_RETRIES", "3"))
         self.catastro_retry_delay = float(os.getenv("CATASTRO_CATASTRO_RETRY_DELAY", "1.0"))
 
+        self.catastro_total_timeout = float(os.getenv("CATASTRO_TOTAL_TIMEOUT", "30"))
+        self.catastro_max_concurrency = int(os.getenv("CATASTRO_MAX_CONCURRENCY", "4"))
+        self.catastro_cache_ttl = float(os.getenv("CATASTRO_CACHE_TTL", "60"))
+        self.catastro_catalogue_cache_ttl = float(os.getenv("CATASTRO_CATALOGUE_CACHE_TTL", "3600"))
+        self.catastro_cache_size = int(os.getenv("CATASTRO_CACHE_SIZE", "128"))
+        self.revision = os.getenv("CATASTRO_REVISION", "desconocida")
+        if (
+            min(self.catastro_timeout, self.catastro_total_timeout, self.catastro_max_concurrency)
+            <= 0
+        ):
+            raise ValueError("Timeouts y concurrencia deben ser positivos")
+        if (
+            min(
+                self.catastro_max_retries,
+                self.catastro_retry_delay,
+                self.catastro_cache_ttl,
+                self.catastro_catalogue_cache_ttl,
+                self.catastro_cache_size,
+            )
+            < 0
+        ):
+            raise ValueError("Reintentos y caché no pueden ser negativos")
+
         # OpenAI (opcional)
         self.openai_api_key = os.getenv("CATASTRO_OPENAI_API_KEY")
         self.openai_model = os.getenv("CATASTRO_OPENAI_MODEL", "gpt-4")

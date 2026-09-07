@@ -6,7 +6,12 @@ import logging
 import re
 import time
 import unicodedata
-from typing import Any, Dict
+from collections import OrderedDict
+from copy import deepcopy
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from functools import wraps
+from typing import Any
 
 import httpx
 from defusedxml import ElementTree as ET
@@ -14,11 +19,9 @@ from defusedxml.common import DefusedXmlException
 from pydantic import ValidationError
 
 from config.settings import (
-    ERROR_MESSAGES,
     CatastroEndpoints,
     get_settings,
     log_failure,
-    log_sensitive,
 )
 from models.catastro_models import (
     CandidatoCallejero,
@@ -52,6 +55,20 @@ def number(value: Any) -> float | None:
     return float(text.replace(",", "."))
 
 
+def query_budget(method):
+    """Incluye espera de concurrencia, reintentos y consultas encadenadas."""
+
+    @wraps(method)
+    async def bounded(self, *args, **kwargs):
+        try:
+            async with asyncio.timeout(self.settings.catastro_total_timeout):
+                return await method(self, *args, **kwargs)
+        except TimeoutError as exc:
+            return self._error("DESCONOCIDA", exc)
+
+    return bounded
+
+
 class CatastroService:
     def __init__(self, http_client: httpx.AsyncClient | None = None):
         self.settings = get_settings()
@@ -61,6 +78,8 @@ class CatastroService:
         self.retry_delay = self.settings.catastro_retry_delay
         self.http_client = http_client or httpx.AsyncClient(timeout=self.timeout)
         self._owns_http_client = http_client is None
+        self._semaphore = asyncio.Semaphore(self.settings.catastro_max_concurrency)
+        self._cache: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
 
     async def aclose(self) -> None:
         if self._owns_http_client:
@@ -76,6 +95,20 @@ class CatastroService:
         )
         invalid = isinstance(exc, ValidationError)
         timeout = isinstance(exc, (TimeoutError, httpx.TimeoutException))
+        if isinstance(exc, httpx.HTTPStatusError):
+            return CatastroResponse(
+                referencia_catastral=referencia,
+                estado_consulta="error",
+                codigo_error=f"HTTP_{exc.response.status_code}",
+                mensaje_error=f"Catastro devolvió HTTP {exc.response.status_code}",
+            )
+        if isinstance(exc, httpx.TransportError) and not timeout:
+            return CatastroResponse(
+                referencia_catastral=referencia,
+                estado_consulta="error",
+                codigo_error="ERROR_CONEXION",
+                mensaje_error="No se pudo conectar con Catastro",
+            )
         return CatastroResponse(
             referencia_catastral=referencia,
             estado_consulta="error_formato" if invalid else "error",
@@ -89,6 +122,7 @@ class CatastroService:
             ),
         )
 
+    @query_budget
     async def consultar_por_referencia(
         self, referencia: str, incluir_raw: bool = False
     ) -> CatastroResponse:
@@ -98,6 +132,7 @@ class CatastroService:
         except Exception as exc:
             return self._error(referencia, exc)
 
+    @query_budget
     async def consultar_parcela_por_codigo(
         self, codigo_parcela: str, incluir_raw: bool = False
     ) -> CatastroResponse:
@@ -123,8 +158,28 @@ class CatastroService:
         return self._construir_respuesta_catastral(ref, raw, kind, incluir_raw)
 
     async def _request(self, endpoint: str, params: dict[str, str]) -> dict:
+        key = (endpoint, tuple(sorted(params.items())))
+        cached = self._cache.get(key)
+        if cached and cached[0] > time.monotonic():
+            self._cache.move_to_end(key)
+            logger.info("Caché Catastro endpoint=%s", endpoint.rsplit("/", 1)[-1])
+            return deepcopy(cached[1])
+        if cached:
+            del self._cache[key]
         response = await self._realizar_consulta_con_reintentos(self.base_url + endpoint, params)
-        return self._parsear_respuesta_json(response.text)
+        raw = self._parsear_respuesta_json(response.text)
+        root = self._root(raw)
+        ttl = (
+            self.settings.catastro_catalogue_cache_ttl
+            if "Obtener" in endpoint
+            else self.settings.catastro_cache_ttl
+        )
+        if ttl > 0 and self.settings.catastro_cache_size > 0 and not self._provider_error(root, ""):
+            self._cache[key] = (time.monotonic() + ttl, deepcopy(raw))
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.settings.catastro_cache_size:
+                self._cache.popitem(last=False)
+        return raw
 
     def _parsear_respuesta_json(self, content: str) -> dict:
         try:
@@ -310,78 +365,59 @@ class CatastroService:
     async def _realizar_consulta_con_reintentos(
         self,
         url: str,
-        params: Dict[str, str],
-        headers: Dict[str, str] = None,
+        params: dict[str, str],
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        """Realiza una consulta HTTP con reintentos automáticos"""
-
-        for intento in range(self.max_retries + 1):
-            inicio = time.perf_counter()
-            endpoint = url.rsplit("/", 1)[-1]
+        """Reintenta solo transporte y estados transitorios, dentro del presupuesto."""
+        for attempt in range(self.max_retries + 1):
+            start = time.monotonic()
+            response = None
             try:
-                logger.info(
-                    "Consulta Catastro endpoint=%s intento=%d",
-                    endpoint,
-                    intento + 1,
-                )
-
-                # Usar GET para la nueva API WCF JSON - funciona con parámetros en URL
-                if headers:
+                async with self._semaphore:
                     response = await self.http_client.get(url, params=params, headers=headers)
-                else:
-                    response = await self.http_client.get(url, params=params)
-                response.raise_for_status()
-
-                # Verificar que la respuesta no esté vacía
+                    response.raise_for_status()
                 if not response.text.strip():
-                    raise ValueError("Respuesta vacía del servidor")
-
+                    raise ValueError("Respuesta vacía del Catastro")
                 logger.info(
-                    "Consulta Catastro completada endpoint=%s estado=%d duracion_ms=%.1f",
-                    endpoint,
+                    "Consulta Catastro endpoint=%s estado=%d duracion_ms=%.1f intento=%d",
+                    url.rsplit("/", 1)[-1],
                     response.status_code,
-                    (time.perf_counter() - inicio) * 1000,
+                    (time.monotonic() - start) * 1000,
+                    attempt + 1,
                 )
                 return response
-
-            except httpx.TimeoutException:
-                if intento < self.max_retries:
-                    logger.warning(
-                        "Timeout de Catastro endpoint=%s intento=%d; reintentando",
-                        endpoint,
-                        intento + 1,
-                    )
-                    await asyncio.sleep(self.retry_delay * (intento + 1))
-                else:
-                    raise ValueError(ERROR_MESSAGES["TIMEOUT"])
-
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 503:
-                    if intento < self.max_retries:
-                        logger.warning(
-                            "Catastro no disponible endpoint=%s intento=%d; reintentando",
-                            endpoint,
-                            intento + 1,
-                        )
-                        await asyncio.sleep(self.retry_delay * (intento + 1))
-                    else:
-                        raise ValueError(ERROR_MESSAGES["SERVICIO_NO_DISPONIBLE"])
-                else:
-                    raise ValueError(f"Error HTTP {e.response.status_code}")
-
-            except Exception as e:
-                if intento < self.max_retries:
-                    log_failure(
-                        logger,
-                        logging.WARNING,
-                        self.settings.log_sensitive_data,
-                        f"Fallo de Catastro endpoint={endpoint} intento={intento + 1}; reintentando",
-                        e,
-                    )
-                    await asyncio.sleep(self.retry_delay * (intento + 1))
-                else:
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                retryable = isinstance(exc, httpx.TransportError) or exc.response.status_code in {
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                }
+                if not retryable or attempt == self.max_retries:
                     raise
+                delay = self.retry_delay * (2**attempt)
+                if response is not None and response.headers.get("Retry-After"):
+                    delay = max(delay, self._retry_after(response.headers["Retry-After"]))
+                logger.warning(
+                    "Reintento Catastro endpoint=%s intento=%d", url.rsplit("/", 1)[-1], attempt + 1
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError("Consulta sin resultado")
 
+    @staticmethod
+    def _retry_after(value: str) -> float:
+        try:
+            return max(0, float(value))
+        except ValueError:
+            try:
+                return max(
+                    0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+                )
+            except ValueError, TypeError, OverflowError:
+                return 0
+
+    @query_budget
     async def consultar_por_coordenadas(
         self, latitud: float, longitud: float, incluir_raw: bool = False
     ) -> CatastroResponse:
@@ -455,6 +491,7 @@ class CatastroService:
                 references.append(reference)
         return references
 
+    @query_budget
     async def buscar_por_direccion(
         self,
         provincia: str,

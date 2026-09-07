@@ -1,5 +1,6 @@
 """Resumen de datos públicos, con procedencia y degradación explícitas."""
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Literal
@@ -44,7 +45,10 @@ class AIService:
                 reason = "CLAVE_NO_CONFIGURADA"
             else:
                 try:
-                    text = await self._generar_resumen_openai(data, idioma)
+                    text = await asyncio.wait_for(
+                        self._generar_resumen_openai(data, idioma),
+                        timeout=self.settings.catastro_total_timeout,
+                    )
                     return ResumenIA(
                         referencia_catastral=data.referencia_catastral,
                         resumen=text,
