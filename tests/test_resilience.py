@@ -130,3 +130,20 @@ async def test_external_cancellation_is_not_swallowed():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_malformed_success_is_not_cached():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"consulta_dnprcResult": {"control": {"cudnp": 1}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = CatastroService(client)
+        result = await service.consultar_por_referencia(REF)
+        await service.consultar_por_referencia(REF)
+        assert not service._cache
+    assert len(calls) == 2
+    assert result.codigo_error == "RESPUESTA_INVALIDA"

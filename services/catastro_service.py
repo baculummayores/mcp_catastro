@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -52,7 +53,10 @@ def number(value: Any) -> float | None:
     text = str(value).strip()
     if re.fullmatch(r"-?[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]+)?", text):
         text = text.replace(".", "")
-    return float(text.replace(",", "."))
+    value = float(text.replace(",", "."))
+    if not math.isfinite(value):
+        raise ValueError("Número no finito en la respuesta del Catastro")
+    return value
 
 
 def query_budget(method):
@@ -64,7 +68,10 @@ def query_budget(method):
             async with asyncio.timeout(self.settings.catastro_total_timeout):
                 return await method(self, *args, **kwargs)
         except TimeoutError as exc:
-            return self._error("DESCONOCIDA", exc)
+            ref = kwargs.get(
+                "referencia", kwargs.get("codigo_parcela", args[0] if args else "DESCONOCIDA")
+            )
+            return self._error(ref if isinstance(ref, str) else "DESCONOCIDA", exc)
 
     return bounded
 
@@ -113,7 +120,13 @@ class CatastroService:
             referencia_catastral=referencia,
             estado_consulta="error_formato" if invalid else "error",
             codigo_error=(
-                "ENTRADA_INVALIDA" if invalid else "TIMEOUT" if timeout else "ERROR_SERVICIO"
+                "ENTRADA_INVALIDA"
+                if invalid
+                else (
+                    "TIMEOUT"
+                    if timeout
+                    else "RESPUESTA_INVALIDA" if isinstance(exc, ValueError) else "ERROR_SERVICIO"
+                )
             ),
             mensaje_error=(
                 "Entrada inválida"
@@ -220,6 +233,18 @@ class CatastroService:
             key in root for key in ("control", "bico", "lrcdnp", "coordenadas", "lerr")
         ):
             raise ValueError("Estructura de respuesta del Catastro no reconocida")
+        control = root.get("control", {})
+        if not isinstance(control, dict):
+            raise ValueError("Control de respuesta inválido")
+        if not root.get("lerr") and not int(control.get("cuerr", 0)):
+            for count, containers in {
+                "cudnp": ("bico", "lrcdnp"),
+                "cucoor": ("coordenadas",),
+                "cumun": ("municipiero",),
+                "cuca": ("callejero",),
+            }.items():
+                if int(control.get(count, 0)) > 0 and not any(root.get(key) for key in containers):
+                    raise ValueError("Catastro anuncia resultados pero falta su contenido")
         return root
 
     def _provider_error(self, root: dict, ref: str) -> CatastroResponse | None:
@@ -525,6 +550,7 @@ class CatastroService:
             root = self._root(raw)
             failure = self._provider_error(root, "BUSQUEDA_DIRECCION")
             if failure:
+                failure.datos_raw = raw if incluir_raw else None
                 return failure
             municipalities = [
                 CandidatoCallejero(
@@ -535,7 +561,9 @@ class CatastroService:
             selected = self._select_candidate(municipalities, municipio)
             if selected is None:
                 return self._candidates(
-                    municipalities, "Seleccione un municipio del callejero oficial"
+                    municipalities,
+                    "Seleccione un municipio del callejero oficial",
+                    raw if incluir_raw else None,
                 )
             municipio = selected.nombre
             types = {
@@ -561,6 +589,7 @@ class CatastroService:
             root = self._root(raw)
             failure = self._provider_error(root, "BUSQUEDA_DIRECCION")
             if failure:
+                failure.datos_raw = raw if incluir_raw else None
                 return failure
             streets = [
                 CandidatoCallejero(
@@ -574,11 +603,15 @@ class CatastroService:
             selected = self._select_candidate(streets, nombre_via)
             if selected is None:
                 return self._candidates(
-                    streets, "Seleccione una vía y su tipo del callejero oficial"
+                    streets,
+                    "Seleccione una vía y su tipo del callejero oficial",
+                    raw if incluir_raw else None,
                 )
             if not numero.strip():
                 return self._candidates(
-                    [selected], "Indique el número de la vía seleccionada; puede usar S/N"
+                    [selected],
+                    "Indique el número de la vía seleccionada; puede usar S/N",
+                    raw if incluir_raw else None,
                 )
             raw = await self._request(
                 CatastroEndpoints.CONSULTA_DNPLOC,
@@ -622,7 +655,9 @@ class CatastroService:
         return choices[0] if len(choices) == 1 else None
 
     @staticmethod
-    def _candidates(candidates: list[CandidatoCallejero], message: str) -> CatastroResponse:
+    def _candidates(
+        candidates: list[CandidatoCallejero], message: str, raw: dict | None = None
+    ) -> CatastroResponse:
         return CatastroResponse(
             referencia_catastral="BUSQUEDA_DIRECCION",
             tipo_resultado="callejero",
@@ -630,4 +665,5 @@ class CatastroService:
             candidatos=candidates,
             requiere_seleccion=bool(candidates),
             advertencias=[message],
+            datos_raw=raw,
         )
