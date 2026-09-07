@@ -26,7 +26,7 @@ class Settings:
     def __init__(self):
         # Configuración del servicio
         self.app_name = os.getenv("CATASTRO_APP_NAME", "MCP Catastro España")
-        self.app_version = os.getenv("CATASTRO_APP_VERSION", "1.0.0")
+        self.app_version = os.getenv("CATASTRO_APP_VERSION", "2.0.0")
         self.debug = _env_bool("CATASTRO_DEBUG")
 
         # API del Catastro

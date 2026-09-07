@@ -25,7 +25,8 @@ async def test_reference_preserves_address_and_constructions():
     assert result.direccion.numero == "6"
     assert result.direccion.codigo_postal == "18100"
     assert result.direccion.escalera == "1"
-    assert result.datos_basicos.superficie_suelo == 304
+    assert result.superficie_parcela == 304
+    assert result.datos_basicos.superficie_suelo is None
     assert result.inmuebles[0].construcciones[0].superficie == 46
     assert result.datos_raw is None
 

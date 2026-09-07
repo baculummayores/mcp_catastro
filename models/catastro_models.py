@@ -4,7 +4,7 @@ Modelos de datos para el servicio de Catastro
 
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -173,7 +173,9 @@ class CatastroResponse(BaseModel):
     valores: Optional[ValorCatastral] = None
     coordenadas: Optional[Coordenadas] = None
     fecha_consulta: datetime = Field(default_factory=datetime.now)
-    estado_consulta: str = Field(default="exitosa")
+    estado_consulta: Literal[
+        "exitosa", "sin_datos", "error", "error_formato", "requiere_seleccion"
+    ] = "exitosa"
     mensaje_error: Optional[str] = None
     codigo_error: Optional[str] = None
     errores_origen: list[dict[str, str]] = Field(default_factory=list)
@@ -181,7 +183,13 @@ class CatastroResponse(BaseModel):
     candidatos: list[CandidatoCallejero] = Field(default_factory=list)
     total_inmuebles: int = 0
     requiere_seleccion: bool = False
-    tipo_resultado: Optional[str] = None
+    tipo_resultado: (
+        Literal["inmueble", "parcela", "direccion", "localizacion", "callejero"] | None
+    ) = None
+    superficie_parcela: Optional[float] = Field(
+        None,
+        description="Superficie total de la parcela en m²; no es la cuota de suelo del inmueble",
+    )
     advertencias: list[str] = Field(default_factory=list)
     datos_raw: Optional[Dict[str, Any]] = Field(None, description="Datos originales de la API")
 

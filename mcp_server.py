@@ -103,22 +103,25 @@ async def consultar_catastro_por_referencia(
     referencia: Annotated[
         str,
         Field(
-            min_length=20,
-            max_length=20,
+            min_length=1,
+            max_length=64,
             description="Referencia catastral completa de 20 caracteres alfanuméricos.",
         ),
     ],
-) -> dict[str, Any]:
+    incluir_raw: Annotated[
+        bool, Field(description="Incluir respuesta original para diagnóstico")
+    ] = False,
+) -> CatastroResponse:
     """Consulta los datos de un inmueble por su referencia catastral completa."""
     resultado = (
         await ctx.request_context.lifespan_context.catastro_service.consultar_por_referencia(
-            referencia
+            referencia, incluir_raw
         )
     )
-    return resultado.model_dump(mode="json")
+    return resultado
 
 
-@app.tool(title="Consultar inmueble por coordenadas", annotations=EXTERNAL_READ_ONLY_TOOL)
+@app.tool(title="Localizar parcelas por coordenadas", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def consultar_catastro_por_coordenadas(
     ctx: Context[AppContext],
     latitud: Annotated[
@@ -128,14 +131,17 @@ async def consultar_catastro_por_coordenadas(
         float,
         Field(ge=-180.0, le=180.0, description="Longitud WGS84 en grados decimales."),
     ],
-) -> dict[str, Any]:
-    """Localiza y consulta un inmueble a partir de coordenadas en España."""
+    incluir_raw: Annotated[
+        bool, Field(description="Incluir respuesta original para diagnóstico")
+    ] = False,
+) -> CatastroResponse:
+    """Localiza parcelas por coordenadas y devuelve sus inmuebles como candidatos."""
     resultado = (
         await ctx.request_context.lifespan_context.catastro_service.consultar_por_coordenadas(
-            latitud, longitud
+            latitud, longitud, incluir_raw
         )
     )
-    return resultado.model_dump(mode="json")
+    return resultado
 
 
 @app.tool(title="Generar resumen catastral", annotations=EXTERNAL_READ_ONLY_TOOL)
@@ -144,8 +150,8 @@ async def generar_resumen_ia(
     referencia: Annotated[
         str,
         Field(
-            min_length=20,
-            max_length=20,
+            min_length=1,
+            max_length=64,
             description="Referencia catastral completa de 20 caracteres.",
         ),
     ],
@@ -238,19 +244,22 @@ async def consultar_parcela_por_codigo(
     codigo_parcela: Annotated[
         str,
         Field(
-            min_length=14,
-            max_length=14,
+            min_length=1,
+            max_length=64,
             description="Código de parcela catastral de 14 caracteres.",
         ),
     ],
-) -> dict[str, Any]:
+    incluir_raw: Annotated[
+        bool, Field(description="Incluir respuesta original para diagnóstico")
+    ] = False,
+) -> CatastroResponse:
     """Consulta todos los inmuebles asociados a una parcela catastral."""
     resultado = (
         await ctx.request_context.lifespan_context.catastro_service.consultar_parcela_por_codigo(
-            codigo_parcela
+            codigo_parcela, incluir_raw
         )
     )
-    return resultado.model_dump(mode="json")
+    return resultado
 
 
 @app.resource(
@@ -265,6 +274,14 @@ def informacion_api_catastro() -> dict[str, Any]:
     return {
         "version": settings.app_version,
         "sdk_mcp": "2.x",
+        "revision": settings.revision,
+        "contrato": "2.0",
+        "limites": {
+            "tiempo_total_segundos": settings.catastro_total_timeout,
+            "concurrencia": settings.catastro_max_concurrency,
+            "cache_ttl_segundos": settings.catastro_cache_ttl,
+            "cache_callejero_ttl_segundos": settings.catastro_catalogue_cache_ttl,
+        },
         "description": "Servidor MCP para consultas al Catastro de España",
         "herramientas_disponibles": [
             "consultar_catastro_por_referencia",

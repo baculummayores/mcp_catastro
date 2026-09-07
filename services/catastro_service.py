@@ -275,6 +275,9 @@ class CatastroService:
             result = CatastroResponse(
                 referencia_catastral=referencia,
                 estado_consulta="exitosa" if items else "sin_datos",
+                superficie_parcela=number(
+                    root.get("bico", {}).get("finca", {}).get("dff", {}).get("ss")
+                ),
                 tipo_resultado=kind,
                 inmuebles=items,
                 total_inmuebles=len(items),
@@ -337,7 +340,6 @@ class CatastroService:
             uso=debi.get("luso"),
             superficie_construida=number(debi.get("sfc")),
             antiguedad=int(debi["ant"]) if debi.get("ant") else None,
-            superficie_suelo=number(bico.get("finca", {}).get("dff", {}).get("ss")),
         )
         constructions = bico.get("lcons")
         if isinstance(constructions, dict):

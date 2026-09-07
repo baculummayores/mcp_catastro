@@ -40,7 +40,7 @@ def test_mcp_v2_tools_and_resource(monkeypatch) -> None:
                 tools["consultar_parcela_por_codigo"].input_schema["properties"]["codigo_parcela"][
                     "maxLength"
                 ]
-                == 14
+                == 64
             )
             external_tools = {
                 "consultar_catastro_por_referencia",
@@ -81,7 +81,8 @@ def test_mcp_v2_tools_and_resource(monkeypatch) -> None:
                 "consultar_parcela_por_codigo",
                 {"codigo_parcela": "CORTO"},
             )
-            assert invalid.is_error is True
+            assert invalid.is_error is False
+            assert invalid.structured_content["codigo_error"] == "ENTRADA_INVALIDA"
 
             resources = await client.list_resources()
             assert [resource.uri for resource in resources.resources] == ["catastro://api/info"]
