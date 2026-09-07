@@ -380,129 +380,78 @@ class CatastroService:
                 else:
                     raise
 
-    async def consultar_por_coordenadas(self, latitud: float, longitud: float) -> CatastroResponse:
-        """
-        Consulta datos catastrales por coordenadas geográficas usando la nueva API WCF
-
-        Args:
-            latitud: Latitud en grados decimales
-            longitud: Longitud en grados decimales
-
-        Returns:
-            CatastroResponse con los datos encontrados
-        """
+    async def consultar_por_coordenadas(
+        self, latitud: float, longitud: float, incluir_raw: bool = False
+    ) -> CatastroResponse:
+        """Localiza parcelas; las coordenadas no identifican una planta/puerta."""
         try:
-            # Validar coordenadas
             coords = Coordenadas(latitud=latitud, longitud=longitud)
-
-            # Preparar parámetros para la consulta de coordenadas
-            params = {
-                "SRS": "EPSG:4326",  # WGS84
-                "Coordenada_X": str(coords.longitud),
-                "Coordenada_Y": str(coords.latitud),
-            }
-
-            # Realizar consulta a la nueva API de coordenadas
-            url = f"{self.base_url}{CatastroEndpoints.CONSULTA_RCCOOR}"
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
-            response = await self._realizar_consulta_con_reintentos(url, params, headers)
-
-            # Parsear respuesta JSON
-            datos_parseados = self._parsear_respuesta_json(response.text)
-
-            # Extraer referencia catastral de la respuesta
-            referencia = self._extraer_referencia_de_coordenadas(datos_parseados)
-
-            # Si encontramos referencia, hacer consulta completa de datos
-            if referencia and referencia != "DESCONOCIDA":
-                resultado_completo = await self.consultar_por_referencia(referencia)
-                resultado_completo.coordenadas = coords
-                return resultado_completo
-
-            # Si no hay referencia, devolver respuesta básica
-            return CatastroResponse(
-                referencia_catastral="DESCONOCIDA",
-                estado_consulta="sin_datos",
-                mensaje_error="No se encontró inmueble en las coordenadas especificadas",
-                coordenadas=coords,
-                datos_raw=datos_parseados,
+            if not (27 <= coords.latitud <= 44 and -19 <= coords.longitud <= 5):
+                return CatastroResponse(
+                    referencia_catastral="DESCONOCIDA",
+                    coordenadas=coords,
+                    estado_consulta="error",
+                    codigo_error="FUERA_COBERTURA",
+                    mensaje_error="Punto fuera del ámbito geográfico admitido por este conector de Catastro",
+                )
+            raw = await self._request(
+                CatastroEndpoints.CONSULTA_RCCOOR,
+                {"SRS": "EPSG:4326", "CoorX": str(coords.longitud), "CoorY": str(coords.latitud)},
             )
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error consultando por coordenadas",
-                e,
+            root = self._root(raw)
+            failure = self._provider_error(root, "DESCONOCIDA")
+            if failure:
+                failure.coordenadas = coords
+                failure.datos_raw = raw if incluir_raw else None
+                return failure
+            references = self._extraer_referencias_de_coordenadas(root)
+            if not references:
+                raise ValueError("Respuesta de coordenadas sin parcelas reconocibles")
+            parcels = [
+                await self.consultar_parcela_por_codigo(ref, incluir_raw) for ref in references
+            ]
+            failed = [p for p in parcels if p.estado_consulta != "exitosa"]
+            if failed:
+                result = failed[0]
+                result.coordenadas = coords
+                result.advertencias.append(
+                    "No se pudo completar la consulta de todas las parcelas localizadas"
+                )
+                return result
+            if len(parcels) == 1:
+                result = parcels[0]
+            else:
+                items = {i.referencia_catastral: i for p in parcels for i in p.inmuebles}
+                result = CatastroResponse(
+                    referencia_catastral="BUSQUEDA_COORDENADAS",
+                    inmuebles=list(items.values()),
+                    total_inmuebles=len(items),
+                    requiere_seleccion=len(items) > 1,
+                )
+            result.tipo_resultado = "localizacion"
+            result.coordenadas = coords
+            result.advertencias.append(
+                "Las coordenadas localizan la parcela; seleccione el inmueble por escalera, planta y puerta"
             )
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "Coordenadas consultadas: latitud=%s longitud=%s",
-                latitud,
-                longitud,
-            )
-            return CatastroResponse(
-                referencia_catastral="DESCONOCIDA",
-                estado_consulta="error",
-                mensaje_error=str(e),
-                coordenadas=Coordenadas(latitud=latitud, longitud=longitud),
-            )
+            if incluir_raw:
+                result.datos_raw = {"coordenadas": raw, "parcelas": [p.datos_raw for p in parcels]}
+            return result
+        except Exception as exc:
+            return self._error("DESCONOCIDA", exc)
 
-    def _extraer_referencia_de_coordenadas(self, datos: Dict[str, Any]) -> str:
-        """Extrae la referencia catastral de una consulta por coordenadas usando estructura oficial"""
-        try:
-            # Buscar en la estructura oficial de coordenadas
-            # La respuesta de CONSULTA_RCCOOR puede tener una estructura diferente
-
-            # Intentar estructura de coordenadas primero
-            consulta_rccoor = datos.get("consulta_rccoorResult", {})
-            if consulta_rccoor:
-                # Extraer referencia directamente si está disponible
-                if "refcat" in consulta_rccoor:
-                    return consulta_rccoor["refcat"]
-                if "pc" in consulta_rccoor:
-                    return consulta_rccoor["pc"]
-
-            # Intentar estructura estándar de DNPRC si la coordenada retorna datos completos
-            consulta_result = datos.get("consulta_dnprcResult", {})
-            if consulta_result:
-                lrcdnp = consulta_result.get("lrcdnp", {})
-                rcdnp_data = lrcdnp.get("rcdnp", {})
-
-                if isinstance(rcdnp_data, list) and rcdnp_data:
-                    rc_data = rcdnp_data[0].get("rc", {})
-                elif isinstance(rcdnp_data, dict):
-                    rc_data = rcdnp_data.get("rc", {})
-                else:
-                    return "DESCONOCIDA"
-
-                # Construir referencia completa
-                pc1 = rc_data.get("pc1", "")
-                pc2 = rc_data.get("pc2", "")
-                car = rc_data.get("car", "")
-                cc1 = rc_data.get("cc1", "")
-                cc2 = rc_data.get("cc2", "")
-
-                if pc1 and pc2:
-                    return f"{pc1}{pc2}{car}{cc1}{cc2}"
-
-            return "DESCONOCIDA"
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error extrayendo referencia de coordenadas",
-                e,
-            )
-            return "DESCONOCIDA"
+    @staticmethod
+    def _extraer_referencias_de_coordenadas(root: dict) -> list[str]:
+        references = []
+        for coord in as_list(root.get("coordenadas", {}).get("coord")):
+            pc = coord.get("pc", {})
+            reference = str(pc.get("pc1", "")) + str(pc.get("pc2", ""))
+            if not ReferenciaCatastral.analizar_referencia_detallado(reference)[
+                "es_codigo_parcela"
+            ]:
+                raise ValueError("Código de parcela inválido en respuesta de coordenadas")
+            if reference not in references:
+                references.append(reference)
+        return references
 
     async def buscar_por_direccion(
         self,

@@ -179,11 +179,11 @@ async def consultar_catastro_por_referencia(
 async def consultar_catastro_por_coordenadas(
     ctx: Context[AppContext],
     latitud: Annotated[
-        float, Field(ge=35.0, le=44.0, description="Latitud WGS84 en grados decimales.")
+        float, Field(ge=-90.0, le=90.0, description="Latitud WGS84 en grados decimales.")
     ],
     longitud: Annotated[
         float,
-        Field(ge=-10.0, le=5.0, description="Longitud WGS84 en grados decimales."),
+        Field(ge=-180.0, le=180.0, description="Longitud WGS84 en grados decimales."),
     ],
 ) -> dict[str, Any]:
     """Localiza y consulta un inmueble a partir de coordenadas en España."""

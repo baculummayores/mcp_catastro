@@ -161,10 +161,10 @@ VALIDATION_CONFIG = {
         "length": 20,
     },
     "coordenadas": {
-        "latitud_min": 35.0,
-        "latitud_max": 44.0,
-        "longitud_min": -10.0,
-        "longitud_max": 5.0,
+        "latitud_min": -90.0,
+        "latitud_max": 90.0,
+        "longitud_min": -180.0,
+        "longitud_max": 180.0,
     },
 }
 
