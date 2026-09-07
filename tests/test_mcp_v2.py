@@ -52,7 +52,7 @@ def test_mcp_v2_tools_and_resource() -> None:
             )
             assert result.is_error is False
             assert result.structured_content is not None
-            assert result.structured_content["es_valida"] is False
+            assert result.structured_content["es_valida"] is True
             assert result.structured_content["analisis_detallado"]["longitud"] == 14
 
             address = await client.call_tool(

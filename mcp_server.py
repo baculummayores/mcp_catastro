@@ -234,7 +234,7 @@ def validar_referencia_catastral(
     analisis = ReferenciaCatastral.analizar_referencia_detallado(referencia)
     return {
         "referencia": referencia,
-        "es_valida": analisis["es_referencia_completa"],
+        "es_valida": analisis["es_valida"],
         "mensaje": analisis["mensaje"],
         "analisis_detallado": analisis,
     }
