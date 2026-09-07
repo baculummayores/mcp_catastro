@@ -2,6 +2,7 @@
 """Servidor MCP v2 para consultar el Catastro de España."""
 
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from config.settings import configure_logging, get_settings
-from models.catastro_models import ReferenciaCatastral
+from models.catastro_models import CatastroResponse, ReferenciaCatastral
 from services.ai_summary import AIService
 from services.catastro_service import CatastroService
 
@@ -60,9 +61,10 @@ app = MCPServer(
     title="Catastro de España",
     description="Consultas de datos públicos del Catastro de España.",
     instructions=(
-        "Usa las herramientas para consultar referencias catastrales, parcelas y "
-        "coordenadas en España. La búsqueda por dirección es informativa porque "
-        "la API pública del Catastro no la ofrece de forma fiable."
+        "Consulta datos públicos por referencia, parcela, dirección o coordenadas. "
+        "Las búsquedas pueden devolver varios candidatos: solicita escalera, planta o puerta "
+        "para elegir un inmueble. Comprueba estado_consulta y codigo_error; sin_datos no "
+        "equivale a un fallo de servicio. La cobertura depende de la Dirección General del Catastro."
     ),
     version=settings.app_version,
     lifespan=app_lifespan,
@@ -70,88 +72,28 @@ app = MCPServer(
 
 
 def parse_direccion_completa(direccion: str) -> dict[str, Any]:
-    """Descompone una dirección en los campos que espera el servicio."""
-    try:
-        partes = [parte.strip().upper() for parte in direccion.split(",")]
-        if len(partes) < 3:
-            return {
-                "error": (
-                    "Formato incorrecto. Use: 'TIPO_VIA NOMBRE_VIA NUMERO, "
-                    "CODIGO_POSTAL, MUNICIPIO, PROVINCIA'"
-                ),
-                "direccion_original": direccion,
-            }
-
-        via_completa = partes[0]
-        tipos_via = [
-            "CALLE",
-            "AVENIDA",
-            "PLAZA",
-            "PASEO",
-            "CARRETERA",
-            "CAMINO",
-            "TRAVESIA",
-            "GLORIETA",
-            "CL",
-            "AV",
-            "PZ",
-            "PS",
-            "CR",
-        ]
-        abreviaturas = {
-            "CL": "CALLE",
-            "AV": "AVENIDA",
-            "PZ": "PLAZA",
-            "PS": "PASEO",
-            "CR": "CARRETERA",
-        }
-        tipo_via = "CALLE"
-        nombre_via = via_completa
-        numero = ""
-
-        for tipo in tipos_via:
-            if via_completa.startswith(f"{tipo} "):
-                tipo_via = abreviaturas.get(tipo, tipo)
-                resto_via = via_completa[len(tipo) :].strip()
-                palabras = resto_via.split()
-                if palabras and palabras[-1].replace("-", "").replace("/", "").isalnum():
-                    numero = palabras[-1]
-                    nombre_via = " ".join(palabras[:-1])
-                else:
-                    nombre_via = resto_via
-                break
-
-        if tipo_via == "CALLE" and nombre_via == via_completa:
-            palabras = via_completa.split()
-            if palabras and palabras[-1].replace("-", "").replace("/", "").isalnum():
-                numero = palabras[-1]
-                nombre_via = " ".join(palabras[:-1])
-
-        if len(partes) == 3:
-            codigo_postal = ""
-            municipio, provincia = partes[1:3]
-        elif len(partes) == 4:
-            codigo_postal, municipio, provincia = partes[1:4]
-        else:
-            codigo_postal = ""
-            municipio, provincia = partes[-2:]
-
-        return {
-            "tipo_via": tipo_via,
-            "nombre_via": nombre_via,
-            "numero": numero,
-            "codigo_postal": codigo_postal,
-            "municipio": municipio,
-            "provincia": provincia,
-            "direccion_original": direccion,
-            "parseado_correctamente": True,
-        }
-    except Exception as exc:
-        return {
-            "error": f"Error parseando dirección: {exc}",
-            "direccion_original": direccion,
-            "parseado_correctamente": False,
-        }
+    """Adaptador de texto libre; los campos explícitos son preferibles."""
+    parts = [p.strip() for p in direccion.split(",")]
+    if len(parts) not in (3, 4):
+        return {"error": "Use 'VÍA NÚMERO, MUNICIPIO, PROVINCIA' o añada el CP tras la vía"}
+    road = parts[0]
+    types = (
+        r"CALLE|AVENIDA|PLAZA|PASEO|CARRETERA|CAMINO|TRAVES[IÍ]A|GLORIETA|CL|AV|PZ|PS|CR|CM|TR|GL"
+    )
+    match = re.match(rf"^({types})\.?\s+(.+)$", road, re.IGNORECASE)
+    kind, name = (match[1], match[2]) if match else ("", road)
+    number_match = re.search(r"\s+(S/N|[0-9]+(?:\s*BIS|[A-Z]|[-/][0-9]+)?)$", name, re.IGNORECASE)
+    number = number_match[1] if number_match else ""
+    if number_match:
+        name = name[: number_match.start()].strip()
+    return {
+        "tipo_via": kind,
+        "nombre_via": name,
+        "numero": number,
+        "municipio": parts[-2],
+        "provincia": parts[-1],
+        "codigo_postal": parts[1] if len(parts) == 4 else "",
+    }
 
 
 @app.tool(title="Consultar inmueble por referencia", annotations=EXTERNAL_READ_ONLY_TOOL)
@@ -240,41 +182,53 @@ def validar_referencia_catastral(
     }
 
 
-@app.tool(title="Información de búsqueda por dirección", annotations=LOCAL_READ_ONLY_TOOL)
+@app.tool(title="Buscar inmuebles por dirección", annotations=EXTERNAL_READ_ONLY_TOOL)
 async def buscar_catastro_por_direccion(
     ctx: Context[AppContext],
     direccion_completa: Annotated[
-        str,
-        Field(
-            min_length=1,
-            description="Dirección: TIPO_VIA NOMBRE NUMERO, CODIGO_POSTAL, MUNICIPIO, PROVINCIA.",
-        ),
-    ],
-) -> dict[str, Any]:
-    """Explica las limitaciones de la búsqueda postal y ofrece alternativas."""
-    componentes = parse_direccion_completa(direccion_completa)
-    if "error" in componentes:
-        return {
-            "error": True,
-            "herramienta": "buscar_catastro_por_direccion",
-            "mensaje": componentes["error"],
-            "direccion_recibida": direccion_completa,
-            "formato_correcto": "TIPO_VIA NOMBRE_VIA NUMERO, CODIGO_POSTAL, MUNICIPIO, PROVINCIA",
-            "ejemplos": [
-                "CALLE REYES CATOLICOS 6, 18100, ARMILLA, GRANADA",
-                "AVENIDA CONSTITUCION 25, 14011, CORDOBA, CORDOBA",
-            ],
-        }
+        str, Field(description="Texto opcional: VÍA NÚMERO, CP, MUNICIPIO, PROVINCIA")
+    ] = "",
+    provincia: str = "",
+    municipio: str = "",
+    tipo_via: str = "",
+    nombre_via: str = "",
+    numero: str = "",
+    bloque: str = "",
+    escalera: str = "",
+    planta: str = "",
+    puerta: str = "",
+    incluir_raw: bool = False,
+) -> CatastroResponse:
+    """Busca por campos estructurados o texto; los campos explícitos prevalecen.
 
-    resultado = await ctx.request_context.lifespan_context.catastro_service.buscar_por_direccion(
-        provincia=componentes.get("provincia", ""),
-        municipio=componentes.get("municipio", ""),
-        tipo_via=componentes.get("tipo_via", "CALLE"),
-        nombre_via=componentes.get("nombre_via", ""),
-        numero=componentes.get("numero", ""),
-        direccion_original=direccion_completa,
+    Devuelve candidatos cuando falta número o hay nombres ambiguos. En edificios
+    devuelve los inmuebles para seleccionar escalera/planta/puerta sin adivinar.
+    """
+    fields = {
+        "provincia": provincia,
+        "municipio": municipio,
+        "tipo_via": tipo_via,
+        "nombre_via": nombre_via,
+        "numero": numero,
+    }
+    if direccion_completa:
+        parsed = parse_direccion_completa(direccion_completa)
+        if "error" in parsed:
+            return CatastroResponse(
+                referencia_catastral="BUSQUEDA_DIRECCION",
+                estado_consulta="error_formato",
+                codigo_error="ENTRADA_INVALIDA",
+                mensaje_error=parsed["error"],
+            )
+        fields = {key: value or parsed[key] for key, value in fields.items()}
+    return await ctx.request_context.lifespan_context.catastro_service.buscar_por_direccion(
+        **fields,
+        bloque=bloque,
+        escalera=escalera,
+        planta=planta,
+        puerta=puerta,
+        incluir_raw=incluir_raw,
     )
-    return resultado.model_dump(mode="json")
 
 
 @app.tool(title="Consultar parcela", annotations=EXTERNAL_READ_ONLY_TOOL)
@@ -319,14 +273,12 @@ def informacion_api_catastro() -> dict[str, Any]:
             "validar_referencia_catastral",
             "consultar_parcela_por_codigo",
         ],
-        "importante": (
-            "La búsqueda por dirección no está disponible de forma fiable en la "
-            "API pública del Catastro. Use sede.catastro.gob.es."
-        ),
+        "importante": "Dirección y coordenadas devuelven candidatos; la consulta local no acredita titularidad ni valor catastral.",
+        "cobertura": "Dirección General del Catastro, incluidas Canarias; Navarra y País Vasco tienen catastros propios.",
         "ejemplos_funcionales": {
-            "referencia_completa": "4228928VG4141K0001IZ",
+            "referencia_completa": "4611123VG4141B0013RS",
             "referencia_parcial": "2314501EG1421S",
-            "coordenadas": {"latitud": 40.4168, "longitud": -3.7038},
+            "coordenadas": {"latitud": 41.9252415752936, "longitud": 3.14946484974333},
         },
     }
 

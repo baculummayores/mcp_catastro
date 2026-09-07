@@ -8,7 +8,20 @@ from mcp import Client
 from mcp_server import app
 
 
-def test_mcp_v2_tools_and_resource() -> None:
+def test_mcp_v2_tools_and_resource(monkeypatch) -> None:
+    from services.catastro_service import CatastroService
+    from tests.test_catastro_responses import fixture
+
+    async def request(self, endpoint, params):
+        name = (
+            "municipalities"
+            if endpoint.endswith("ObtenerMunicipios")
+            else "streets" if endpoint.endswith("ObtenerCallejero") else "address"
+        )
+        return fixture(name)
+
+    monkeypatch.setattr(CatastroService, "_request", request)
+
     async def run() -> None:
         async with Client(app) as client:
             listed = await client.list_tools()
@@ -21,6 +34,7 @@ def test_mcp_v2_tools_and_resource() -> None:
                 "validar_referencia_catastral",
                 "buscar_catastro_por_direccion",
                 "consultar_parcela_por_codigo",
+                "buscar_catastro_por_direccion",
             }
             assert (
                 tools["consultar_parcela_por_codigo"].input_schema["properties"]["codigo_parcela"][
@@ -33,10 +47,10 @@ def test_mcp_v2_tools_and_resource() -> None:
                 "consultar_catastro_por_coordenadas",
                 "generar_resumen_ia",
                 "consultar_parcela_por_codigo",
+                "buscar_catastro_por_direccion",
             }
             local_tools = {
                 "validar_referencia_catastral",
-                "buscar_catastro_por_direccion",
             }
             for tool_name in external_tools | local_tools:
                 annotations = tools[tool_name].annotations
@@ -57,10 +71,11 @@ def test_mcp_v2_tools_and_resource() -> None:
 
             address = await client.call_tool(
                 "buscar_catastro_por_direccion",
-                {"direccion_completa": "CALLE MAYOR 1, MADRID, MADRID"},
+                {"direccion_completa": "CALLE REYES CATOLICOS 6, ARMILLA, GRANADA"},
             )
             assert address.is_error is False
-            assert address.structured_content["estado_consulta"] == "informacion"
+            assert address.structured_content["estado_consulta"] == "exitosa"
+            assert address.structured_content["total_inmuebles"] == 22
 
             invalid = await client.call_tool(
                 "consultar_parcela_por_codigo",

@@ -67,10 +67,10 @@ class CatastroEndpoints:
     COORDENADAS_BASE = "/OVCServWeb/OVCWcfCallejero/COVCCoordenadas.svc"
 
     # Consultas por denominación (REST JSON)
-    CONSULTA_PROVINCIA = f"{CALLEJERO_BASE}/json/ConsultaProvincia"
-    CONSULTA_MUNICIPIO = f"{CALLEJERO_BASE}/json/ConsultaMunicipio"
-    CONSULTA_VIA = f"{CALLEJERO_BASE}/json/ConsultaVia"
-    CONSULTA_NUMERO = f"{CALLEJERO_BASE}/json/ConsultaNumero"
+    CONSULTA_PROVINCIA = f"{CALLEJERO_BASE}/json/ObtenerProvincias"
+    CONSULTA_MUNICIPIO = f"{CALLEJERO_BASE}/json/ObtenerMunicipios"
+    CONSULTA_VIA = f"{CALLEJERO_BASE}/json/ObtenerCallejero"
+    CONSULTA_NUMERO = f"{CALLEJERO_BASE}/json/ObtenerNumerero"
     CONSULTA_DNPLOC = f"{CALLEJERO_BASE}/json/Consulta_DNPLOC"
     CONSULTA_DNPRC = f"{CALLEJERO_BASE}/json/Consulta_DNPRC"
     CONSULTA_DNPPP = f"{CALLEJERO_BASE}/json/Consulta_DNPPP"

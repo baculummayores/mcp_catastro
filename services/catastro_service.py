@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from typing import Any, Dict
 
 import httpx
@@ -20,6 +21,7 @@ from config.settings import (
     log_sensitive,
 )
 from models.catastro_models import (
+    CandidatoCallejero,
     CatastroResponse,
     ConstruccionCatastral,
     Coordenadas,
@@ -457,130 +459,136 @@ class CatastroService:
         self,
         provincia: str,
         municipio: str,
-        tipo_via: str = "CALLE",
+        tipo_via: str = "",
         nombre_via: str = "",
         numero: str = "",
         direccion_original: str = "",
+        bloque: str = "",
+        escalera: str = "",
+        planta: str = "",
+        puerta: str = "",
+        incluir_raw: bool = False,
     ) -> CatastroResponse:
-        """
-        Busca referencias catastrales por dirección postal
-
-        NOTA: La API del Catastro tiene limitaciones significativas para búsquedas por dirección.
-        Los endpoints JSON documentados no están disponibles actualmente.
-
-        Args:
-            provincia: Nombre de la provincia
-            municipio: Nombre del municipio
-            tipo_via: Tipo de vía (CALLE, AVENIDA, etc.)
-            nombre_via: Nombre de la vía
-            numero: Número del inmueble (opcional)
-
-        Returns:
-            CatastroResponse indicando las alternativas disponibles
-        """
-        direccion_mostrar = (
-            direccion_original
-            if direccion_original
-            else f"{tipo_via} {nombre_via} {numero}, {municipio}, {provincia}"
-        )
-        logger.info("Búsqueda informativa por dirección solicitada")
-        log_sensitive(
-            logger,
-            self.settings.log_sensitive_data,
-            "Dirección solicitada: %s",
-            direccion_mostrar,
-        )
-
-        # Verificar si todos los campos necesarios están presentes
-        campos_faltantes = []
-        if not provincia:
-            campos_faltantes.append("PROVINCIA")
-        if not municipio:
-            campos_faltantes.append("MUNICIPIO")
-        if not nombre_via:
-            campos_faltantes.append("NOMBRE_VIA")
-
-        if campos_faltantes:
-            mensaje_error = f"""
-❌ FORMATO DE DIRECCIÓN INCORRECTO
-
-Faltan los siguientes campos obligatorios: {', '.join(campos_faltantes)}
-
-FORMATO CORRECTO REQUERIDO:
-'TIPO_VIA NOMBRE_VIA NUMERO, CODIGO_POSTAL, MUNICIPIO, PROVINCIA'
-
-EJEMPLOS VÁLIDOS:
-• "CALLE REYES CATOLICOS 6, 18100, ARMILLA, GRANADA"
-• "AVENIDA CONSTITUCION 25, 14011, CORDOBA, CORDOBA"
-• "PLAZA MAYOR 1, 28012, MADRID, MADRID"
-
-DIRECCIÓN RECIBIDA: {direccion_mostrar}
-
-Por favor, reintente con el formato correcto.
-            """.strip()
-
+        """Resuelve nombres oficiales antes de consultar una dirección."""
+        logger.info("Búsqueda por dirección solicitada")
+        if not all(value.strip() for value in (provincia, municipio, nombre_via)):
             return CatastroResponse(
-                referencia_catastral="FORMATO_INCORRECTO",
+                referencia_catastral="BUSQUEDA_DIRECCION",
                 estado_consulta="error_formato",
-                mensaje_error=mensaje_error,
-                datos_raw={
-                    "direccion_original": direccion_original,
-                    "campos_faltantes": campos_faltantes,
+                codigo_error="ENTRADA_INVALIDA",
+                mensaje_error="Indique provincia, municipio y nombre de vía",
+            )
+        try:
+            raw = await self._request(
+                CatastroEndpoints.CONSULTA_MUNICIPIO,
+                {"Provincia": provincia, "Municipio": municipio},
+            )
+            root = self._root(raw)
+            failure = self._provider_error(root, "BUSQUEDA_DIRECCION")
+            if failure:
+                return failure
+            municipalities = [
+                CandidatoCallejero(
+                    tipo="municipio", nombre=m["nm"], codigo=str(m.get("locat", {}).get("cmc", ""))
+                )
+                for m in as_list(root.get("municipiero", {}).get("muni"))
+            ]
+            selected = self._select_candidate(municipalities, municipio)
+            if selected is None:
+                return self._candidates(
+                    municipalities, "Seleccione un municipio del callejero oficial"
+                )
+            municipio = selected.nombre
+            types = {
+                "CALLE": "CL",
+                "AVENIDA": "AV",
+                "PLAZA": "PZ",
+                "PASEO": "PS",
+                "CARRETERA": "CR",
+                "CAMINO": "CM",
+                "TRAVESIA": "TR",
+                "GLORIETA": "GL",
+            }
+            tipo_via = types.get(self._canonical(tipo_via), tipo_via.upper())
+            raw = await self._request(
+                CatastroEndpoints.CONSULTA_VIA,
+                {
+                    "Provincia": provincia,
+                    "Municipio": municipio,
+                    "TipoVia": tipo_via,
+                    "NomVia": nombre_via,
                 },
             )
+            root = self._root(raw)
+            failure = self._provider_error(root, "BUSQUEDA_DIRECCION")
+            if failure:
+                return failure
+            streets = [
+                CandidatoCallejero(
+                    tipo="via",
+                    nombre=c["dir"]["nv"],
+                    codigo=str(c["dir"].get("cv", "")),
+                    tipo_via=c["dir"].get("tv"),
+                )
+                for c in as_list(root.get("callejero", {}).get("calle"))
+            ]
+            selected = self._select_candidate(streets, nombre_via)
+            if selected is None:
+                return self._candidates(
+                    streets, "Seleccione una vía y su tipo del callejero oficial"
+                )
+            if not numero.strip():
+                return self._candidates(
+                    [selected], "Indique el número de la vía seleccionada; puede usar S/N"
+                )
+            raw = await self._request(
+                CatastroEndpoints.CONSULTA_DNPLOC,
+                {
+                    "Provincia": provincia,
+                    "Municipio": municipio,
+                    "Sigla": selected.tipo_via or "",
+                    "Calle": selected.nombre,
+                    "Numero": numero,
+                    "Bloque": bloque,
+                    "Escalera": escalera,
+                    "Planta": planta,
+                    "Puerta": puerta,
+                },
+            )
+            result = self._construir_respuesta_catastral(
+                "BUSQUEDA_DIRECCION", raw, "direccion", incluir_raw
+            )
+            if result.total_inmuebles == 1:
+                result.referencia_catastral = result.inmuebles[0].referencia_catastral
+            return result
+        except Exception as exc:
+            return self._error("BUSQUEDA_DIRECCION", exc)
 
-        # Información detallada sobre limitaciones y alternativas
-        mensaje_alternativas = f"""
-⚠️  BÚSQUEDA POR DIRECCIÓN NO DISPONIBLE
+    @staticmethod
+    def _canonical(value: str) -> str:
+        return " ".join(
+            "".join(
+                c
+                for c in unicodedata.normalize("NFD", value.upper())
+                if not unicodedata.combining(c)
+            ).split()
+        )
 
-La API oficial del Catastro NO permite búsquedas directas por dirección postal.
-Los endpoints JSON documentados no están operativos.
+    @classmethod
+    def _select_candidate(
+        cls, candidates: list[CandidatoCallejero], name: str
+    ) -> CandidatoCallejero | None:
+        exact = [c for c in candidates if cls._canonical(c.nombre) == cls._canonical(name)]
+        choices = exact or candidates
+        return choices[0] if len(choices) == 1 else None
 
-📍 DIRECCIÓN SOLICITADA:
-{direccion_mostrar}
-
-✅ ALTERNATIVAS FUNCIONALES:
-
-1. 🌐 SEDE ELECTRÓNICA DEL CATASTRO (Más efectivo):
-   → https://sede.catastro.gob.es
-   → Ir a "Consulta tu catastro"
-   → Buscar por dirección: {direccion_mostrar}
-   → Copiar la referencia catastral (20 caracteres)
-   → Usar aquí: consultar_catastro_por_referencia
-
-2. 📍 BÚSQUEDA POR COORDENADAS GPS:
-   → Abrir Google Maps: {direccion_mostrar}
-   → Copiar coordenadas (clic derecho en el punto exacto)
-   → Usar: consultar_catastro_por_coordenadas
-   → Ejemplo coordenadas: 40.4168, -3.7038
-
-3. 🔍 SI YA TIENES LA REFERENCIA CATASTRAL:
-   → Usar: consultar_catastro_por_referencia
-   → Formato: 20 caracteres alfanuméricos
-   → Ejemplo: 4418928VG4141G0001IW
-
-💡 RECOMENDACIÓN:
-La opción MÁS RÁPIDA es buscar en sede.catastro.gob.es y luego usar 
-la referencia catastral obtenida con nuestras herramientas MCP.
-        """.strip()
-
+    @staticmethod
+    def _candidates(candidates: list[CandidatoCallejero], message: str) -> CatastroResponse:
         return CatastroResponse(
-            referencia_catastral="BUSQUEDA_NO_DISPONIBLE",
-            estado_consulta="informacion",
-            mensaje_error=mensaje_alternativas,
-            direccion=DireccionCatastral(
-                via=f"{tipo_via} {nombre_via}",
-                numero=numero,
-                municipio=municipio,
-                provincia=provincia,
-            ),
-            datos_raw={
-                "tipo_respuesta": "informacion_alternativas",
-                "direccion_solicitada": f"{tipo_via} {nombre_via} {numero}, {municipio}, {provincia}",
-                "alternativas": [
-                    "sede.catastro.gob.es",
-                    "busqueda_por_coordenadas",
-                    "consulta_por_referencia_catastral",
-                ],
-            },
+            referencia_catastral="BUSQUEDA_DIRECCION",
+            tipo_resultado="callejero",
+            estado_consulta="requiere_seleccion" if candidates else "sin_datos",
+            candidatos=candidates,
+            requiere_seleccion=bool(candidates),
+            advertencias=[message],
         )
