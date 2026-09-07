@@ -40,7 +40,9 @@ async def test_openai_client_parameters_and_response(monkeypatch: pytest.MonkeyP
 
     result = await service.generar_resumen(_datos().referencia_catastral, usar_openai=True)
 
-    assert result == "Resumen remoto"
+    assert result.resumen == "Resumen remoto"
+    assert result.metodo_usado == "openai"
+    assert result.motivo_degradacion is None
     async_openai.assert_called_once_with(api_key="test-key")
     create.assert_awaited_once()
     request = create.await_args.kwargs
@@ -72,7 +74,9 @@ async def test_empty_openai_content_uses_local_fallback(
 
     result = await service.generar_resumen(_datos().referencia_catastral, usar_openai=True)
 
-    assert "Resumen Catastral" in result
+    assert "Resumen Catastral" in result.resumen
+    assert result.metodo_usado == "plantilla"
+    assert result.motivo_degradacion is not None
 
 
 @pytest.mark.asyncio
@@ -91,7 +95,9 @@ async def test_openai_api_error_uses_local_fallback(monkeypatch: pytest.MonkeyPa
 
     result = await service.generar_resumen(_datos().referencia_catastral, usar_openai=True)
 
-    assert "Resumen Catastral" in result
+    assert "Resumen Catastral" in result.resumen
+    assert result.metodo_usado == "plantilla"
+    assert result.motivo_degradacion is not None
 
 
 @pytest.mark.asyncio
@@ -108,7 +114,9 @@ async def test_missing_api_key_does_not_import_openai(monkeypatch: pytest.Monkey
 
     result = await service.generar_resumen(_datos().referencia_catastral, usar_openai=True)
 
-    assert "Resumen Catastral" in result
+    assert "Resumen Catastral" in result.resumen
+    assert result.metodo_usado == "plantilla"
+    assert result.motivo_degradacion is not None
 
 
 @pytest.mark.asyncio
@@ -127,4 +135,37 @@ async def test_missing_optional_dependency_uses_local_fallback(
 
     result = await service.generar_resumen(_datos().referencia_catastral, usar_openai=True)
 
-    assert "Resumen Catastral" in result
+    assert "Resumen Catastral" in result.resumen
+    assert result.metodo_usado == "plantilla"
+    assert result.motivo_degradacion is not None
+
+
+@pytest.mark.asyncio
+async def test_summary_includes_full_address_without_historical_claims(monkeypatch):
+    from models.catastro_models import DatosBasicosInmueble, DireccionCatastral
+
+    service = _service(monkeypatch, api_key=None)
+    data = _datos()
+    data.datos_basicos = DatosBasicosInmueble(antiguedad=1900, superficie_construida=52)
+    data.direccion = DireccionCatastral(
+        via="CL MAYOR",
+        numero="6",
+        escalera="1",
+        planta="00",
+        puerta="A",
+        codigo_postal="18100",
+        municipio="ARMILLA",
+    )
+    service.catastro_service.consultar_por_referencia.return_value = data
+    result = await service.generar_resumen(data.referencia_catastral)
+    assert "18100" in result.resumen and "Esc. 1" in result.resumen
+    assert "histórico" not in result.resumen
+    assert result.motivo_degradacion is None
+
+
+@pytest.mark.asyncio
+async def test_openai_client_is_closed(monkeypatch):
+    service = _service(monkeypatch)
+    service._openai_client = SimpleNamespace(close=AsyncMock())
+    await service.aclose()
+    service._openai_client.close.assert_awaited_once()

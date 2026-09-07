@@ -15,7 +15,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from config.settings import configure_logging, get_settings
-from models.catastro_models import CatastroResponse, ReferenciaCatastral
+from models.catastro_models import CatastroResponse, ReferenciaCatastral, ResumenIA
 from services.ai_summary import AIService
 from services.catastro_service import CatastroService
 
@@ -37,10 +37,11 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """Crea una única conexión HTTP reutilizable y garantiza su cierre."""
     async with httpx.AsyncClient(timeout=settings.catastro_timeout) as http_client:
         catastro_service = CatastroService(http_client=http_client)
-        yield AppContext(
-            catastro_service=catastro_service,
-            ai_service=AIService(catastro_service=catastro_service),
-        )
+        ai_service = AIService(catastro_service=catastro_service)
+        try:
+            yield AppContext(catastro_service=catastro_service, ai_service=ai_service)
+        finally:
+            await ai_service.aclose()
 
 
 EXTERNAL_READ_ONLY_TOOL = ToolAnnotations(
@@ -155,8 +156,8 @@ async def generar_resumen_ia(
         Literal["es", "en", "ca"],
         Field(description="Idioma del resumen: español, inglés o catalán."),
     ] = "es",
-) -> str:
-    """Genera un resumen profesional de los datos catastrales."""
+) -> ResumenIA:
+    """Resume datos y declara el método usado y cualquier degradación a plantilla."""
     return await ctx.request_context.lifespan_context.ai_service.generar_resumen(
         referencia, usar_openai, idioma
     )
