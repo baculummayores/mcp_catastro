@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 from config.settings import Settings, configure_logging, log_failure, log_sensitive
@@ -74,7 +75,21 @@ def test_service_logs_hide_inputs_and_raw_payload(monkeypatch: pytest.MonkeyPatc
         stream = io.StringIO()
         settings = _settings(monkeypatch, level="DEBUG", sensitive=False)
         configure_logging(settings, stream=stream)
-        service = CatastroService()
+        service = CatastroService(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda r: httpx.Response(
+                        200,
+                        json={
+                            "consulta_municipieroResult": {
+                                "control": {"cuerr": 1},
+                                "lerr": [{"cod": "1", "des": "No disponible"}],
+                            }
+                        },
+                    )
+                )
+            )
+        )
 
         try:
             await service.consultar_por_referencia("PRIVATE-REF-123")
@@ -88,11 +103,11 @@ def test_service_logs_hide_inputs_and_raw_payload(monkeypatch: pytest.MonkeyPatc
             with pytest.raises(ValueError, match="Error parseando respuesta"):
                 service._parsear_respuesta_json("PRIVATE_RAW_PAYLOAD")
         finally:
-            await service.aclose()
+            await service.http_client.aclose()
 
         output = stream.getvalue()
-        assert "Búsqueda informativa por dirección solicitada" in output
-        assert "Error consultando por referencia (ValidationError)" in output
+        assert "Búsqueda por dirección solicitada" in output
+        assert "Error consultando Catastro (ValidationError)" in output
         assert "PRIVATE" not in output
 
     asyncio.run(run())

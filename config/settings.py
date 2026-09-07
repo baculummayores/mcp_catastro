@@ -26,7 +26,7 @@ class Settings:
     def __init__(self):
         # Configuración del servicio
         self.app_name = os.getenv("CATASTRO_APP_NAME", "MCP Catastro España")
-        self.app_version = os.getenv("CATASTRO_APP_VERSION", "1.0.0")
+        self.app_version = os.getenv("CATASTRO_APP_VERSION", "2.0.0")
         self.debug = _env_bool("CATASTRO_DEBUG")
 
         # API del Catastro
@@ -36,6 +36,29 @@ class Settings:
         self.catastro_timeout = int(os.getenv("CATASTRO_CATASTRO_TIMEOUT", "30"))
         self.catastro_max_retries = int(os.getenv("CATASTRO_CATASTRO_MAX_RETRIES", "3"))
         self.catastro_retry_delay = float(os.getenv("CATASTRO_CATASTRO_RETRY_DELAY", "1.0"))
+
+        self.catastro_total_timeout = float(os.getenv("CATASTRO_TOTAL_TIMEOUT", "30"))
+        self.catastro_max_concurrency = int(os.getenv("CATASTRO_MAX_CONCURRENCY", "4"))
+        self.catastro_cache_ttl = float(os.getenv("CATASTRO_CACHE_TTL", "60"))
+        self.catastro_catalogue_cache_ttl = float(os.getenv("CATASTRO_CATALOGUE_CACHE_TTL", "3600"))
+        self.catastro_cache_size = int(os.getenv("CATASTRO_CACHE_SIZE", "128"))
+        self.revision = os.getenv("CATASTRO_REVISION", "desconocida")
+        if (
+            min(self.catastro_timeout, self.catastro_total_timeout, self.catastro_max_concurrency)
+            <= 0
+        ):
+            raise ValueError("Timeouts y concurrencia deben ser positivos")
+        if (
+            min(
+                self.catastro_max_retries,
+                self.catastro_retry_delay,
+                self.catastro_cache_ttl,
+                self.catastro_catalogue_cache_ttl,
+                self.catastro_cache_size,
+            )
+            < 0
+        ):
+            raise ValueError("Reintentos y caché no pueden ser negativos")
 
         # OpenAI (opcional)
         self.openai_api_key = os.getenv("CATASTRO_OPENAI_API_KEY")
@@ -67,10 +90,10 @@ class CatastroEndpoints:
     COORDENADAS_BASE = "/OVCServWeb/OVCWcfCallejero/COVCCoordenadas.svc"
 
     # Consultas por denominación (REST JSON)
-    CONSULTA_PROVINCIA = f"{CALLEJERO_BASE}/json/ConsultaProvincia"
-    CONSULTA_MUNICIPIO = f"{CALLEJERO_BASE}/json/ConsultaMunicipio"
-    CONSULTA_VIA = f"{CALLEJERO_BASE}/json/ConsultaVia"
-    CONSULTA_NUMERO = f"{CALLEJERO_BASE}/json/ConsultaNumero"
+    CONSULTA_PROVINCIA = f"{CALLEJERO_BASE}/json/ObtenerProvincias"
+    CONSULTA_MUNICIPIO = f"{CALLEJERO_BASE}/json/ObtenerMunicipios"
+    CONSULTA_VIA = f"{CALLEJERO_BASE}/json/ObtenerCallejero"
+    CONSULTA_NUMERO = f"{CALLEJERO_BASE}/json/ObtenerNumerero"
     CONSULTA_DNPLOC = f"{CALLEJERO_BASE}/json/Consulta_DNPLOC"
     CONSULTA_DNPRC = f"{CALLEJERO_BASE}/json/Consulta_DNPRC"
     CONSULTA_DNPPP = f"{CALLEJERO_BASE}/json/Consulta_DNPPP"
@@ -161,10 +184,10 @@ VALIDATION_CONFIG = {
         "length": 20,
     },
     "coordenadas": {
-        "latitud_min": 35.0,
-        "latitud_max": 44.0,
-        "longitud_min": -10.0,
-        "longitud_max": 5.0,
+        "latitud_min": -90.0,
+        "latitud_max": 90.0,
+        "longitud_min": -180.0,
+        "longitud_max": 180.0,
     },
 }
 

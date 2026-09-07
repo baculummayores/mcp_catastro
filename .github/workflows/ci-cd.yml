@@ -32,13 +32,13 @@ jobs:
         uv sync --locked --only-group dev
     
     - name: Check format with Black
-      run: uv run --locked black --check mcp_server.py config models services tests/test_mcp_v2.py tests/test_logging_privacy.py
+      run: uv run --locked black --check mcp_server.py smoke_catastro.py config models services tests/test_*.py
     
     - name: Check imports with isort
-      run: uv run --locked isort --check-only mcp_server.py config models services tests/test_mcp_v2.py tests/test_logging_privacy.py
+      run: uv run --locked isort --check-only mcp_server.py smoke_catastro.py config models services tests/test_*.py
     
     - name: Lint with flake8
-      run: uv run --locked flake8 mcp_server.py config models services tests/test_mcp_v2.py tests/test_logging_privacy.py --max-line-length=100 --extend-ignore=E203,W503,E501,W291,W293
+      run: uv run --locked flake8 mcp_server.py smoke_catastro.py config models services tests/test_*.py --max-line-length=100 --extend-ignore=E203,W503,E501,W291,W293
 
   # Tests unitarios
   test:
@@ -89,14 +89,17 @@ jobs:
     - name: Sync locked dependencies
       run: uv sync --locked --all-groups --all-extras
     
-    - name: Security scan with Safety
-      run: uv run --locked --all-groups --all-extras safety check
+    - name: Audit locked dependencies
+      run: |
+        uv export --locked --all-extras --all-groups --no-emit-project --no-hashes --format requirements-txt --output-file /tmp/catastro-requirements.txt
+        uv run --locked --all-groups --all-extras pip-audit --disable-pip --no-deps -r /tmp/catastro-requirements.txt
     
     - name: Security scan with Bandit
-      run: uv run --locked --all-groups --all-extras bandit -r . -f json -o bandit-report.json || true
+      run: uv run --locked --all-groups --all-extras bandit -r mcp_server.py config models services -f json -o bandit-report.json
     
     - name: Upload security scan results
-      uses: actions/upload-artifact@v3
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
         name: security-scan
         path: bandit-report.json
