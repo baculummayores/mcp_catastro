@@ -91,3 +91,51 @@ def test_mcp_v2_tools_and_resource(monkeypatch) -> None:
             assert payload["sdk_mcp"] == "2.x"
 
     asyncio.run(run())
+
+
+def test_mcp_search_contracts(monkeypatch):
+    from services.catastro_service import CatastroService
+    from tests.test_catastro_responses import fixture
+
+    async def request(self, endpoint, params):
+        if endpoint.endswith("Consulta_RCCOOR"):
+            return fixture("coordinates")
+        return fixture("parcel_multiple" if len(params["RefCat"]) == 14 else "reference")
+
+    monkeypatch.setattr(CatastroService, "_request", request)
+
+    async def run():
+        async with Client(app) as client:
+            tools = {t.name: t for t in (await client.list_tools()).tools}
+            for name in [
+                "consultar_catastro_por_referencia",
+                "consultar_parcela_por_codigo",
+                "consultar_catastro_por_coordenadas",
+                "buscar_catastro_por_direccion",
+            ]:
+                assert "inmuebles" in tools[name].output_schema["properties"]
+            reference = await client.call_tool(
+                "consultar_catastro_por_referencia",
+                {"referencia": "4611123 VG4141B 0013 RS", "incluir_raw": True},
+            )
+            assert reference.structured_content["direccion"]["numero"] == "6"
+            assert reference.structured_content["datos_raw"]
+            parcel = await client.call_tool(
+                "consultar_parcela_por_codigo", {"codigo_parcela": "2314501 EG1421S"}
+            )
+            assert parcel.structured_content["total_inmuebles"] == 7
+            coords = await client.call_tool(
+                "consultar_catastro_por_coordenadas", {"latitud": 28.128, "longitud": -15.434}
+            )
+            assert coords.structured_content["requiere_seleccion"]
+            invalid = await client.call_tool(
+                "consultar_catastro_por_referencia", {"referencia": "4611123VG4141B0013RA"}
+            )
+            assert invalid.structured_content["codigo_error"] == "ENTRADA_INVALIDA"
+            summary = await client.call_tool(
+                "generar_resumen_ia", {"referencia": "4611123VG4141B0013RS"}
+            )
+            assert summary.structured_content["metodo_usado"] == "plantilla"
+            assert "18100" in summary.structured_content["resumen"]
+
+    asyncio.run(run())
