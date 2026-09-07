@@ -46,7 +46,9 @@ def test_catastro_query_with_mock_transport() -> None:
 
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.url.params["RefCat"] == reference
-            return httpx.Response(200, json={"consulta_dnprcResult": {}}, request=request)
+            return httpx.Response(
+                200, json={"consulta_dnprcResult": {"control": {"cudnp": 0}}}, request=request
+            )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
             service = CatastroService(http_client=http_client)

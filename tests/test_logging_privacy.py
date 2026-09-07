@@ -92,7 +92,7 @@ def test_service_logs_hide_inputs_and_raw_payload(monkeypatch: pytest.MonkeyPatc
 
         output = stream.getvalue()
         assert "Búsqueda informativa por dirección solicitada" in output
-        assert "Error consultando por referencia (ValidationError)" in output
+        assert "Error consultando Catastro (ValidationError)" in output
         assert "PRIVATE" not in output
 
     asyncio.run(run())

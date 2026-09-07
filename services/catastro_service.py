@@ -1,15 +1,16 @@
-"""
-Servicio principal para consultas al Catastro de España
-"""
+"""Consultas públicas al Catastro y normalización de sus respuestas WCF/ASMX."""
 
 import asyncio
+import json
 import logging
+import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import httpx
 from defusedxml import ElementTree as ET
 from defusedxml.common import DefusedXmlException
+from pydantic import ValidationError
 
 from config.settings import (
     ERROR_MESSAGES,
@@ -20,19 +21,36 @@ from config.settings import (
 )
 from models.catastro_models import (
     CatastroResponse,
+    ConstruccionCatastral,
     Coordenadas,
     DatosBasicosInmueble,
     DireccionCatastral,
+    InmuebleCatastral,
     ReferenciaCatastral,
-    ValorCatastral,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class CatastroService:
-    """Servicio para consultas al Catastro de España"""
+def as_list(value: Any) -> list:
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
 
+
+def number(value: Any) -> float | None:
+    """Catastro usa punto de miles y coma decimal en los listados."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if re.fullmatch(r"-?[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]+)?", text):
+        text = text.replace(".", "")
+    return float(text.replace(",", "."))
+
+
+class CatastroService:
     def __init__(self, http_client: httpx.AsyncClient | None = None):
         self.settings = get_settings()
         self.base_url = self.settings.catastro_base_url
@@ -43,133 +61,249 @@ class CatastroService:
         self._owns_http_client = http_client is None
 
     async def aclose(self) -> None:
-        """Cierra el cliente HTTP cuando el servicio es responsable de él."""
         if self._owns_http_client:
             await self.http_client.aclose()
 
-    async def consultar_por_referencia(self, referencia: str) -> CatastroResponse:
-        """
-        Consulta datos catastrales por referencia catastral usando la nueva API WCF
+    def _error(self, referencia: str, exc: Exception) -> CatastroResponse:
+        log_failure(
+            logger,
+            logging.ERROR,
+            self.settings.log_sensitive_data,
+            "Error consultando Catastro",
+            exc,
+        )
+        invalid = isinstance(exc, ValidationError)
+        timeout = isinstance(exc, (TimeoutError, httpx.TimeoutException))
+        return CatastroResponse(
+            referencia_catastral=referencia,
+            estado_consulta="error_formato" if invalid else "error",
+            codigo_error=(
+                "ENTRADA_INVALIDA" if invalid else "TIMEOUT" if timeout else "ERROR_SERVICIO"
+            ),
+            mensaje_error=(
+                "Entrada inválida"
+                if invalid
+                else "Tiempo de consulta agotado" if timeout else str(exc)
+            ),
+        )
 
-        Args:
-            referencia: Referencia catastral de 20 caracteres
-
-        Returns:
-            CatastroResponse con los datos encontrados
-        """
+    async def consultar_por_referencia(
+        self, referencia: str, incluir_raw: bool = False
+    ) -> CatastroResponse:
         try:
-            # Validar formato de referencia
-            ref_validada = ReferenciaCatastral(referencia=referencia)
+            ref = ReferenciaCatastral(referencia=referencia).referencia
+            return await self._consultar_referencia(ref, "inmueble", incluir_raw)
+        except Exception as exc:
+            return self._error(referencia, exc)
 
-            # Preparar parámetros para la consulta REST JSON
-            params = {"Provincia": "", "Municipio": "", "RefCat": ref_validada.referencia}
-
-            # Realizar consulta a la nueva API WCF
-            url = f"{self.base_url}{CatastroEndpoints.CONSULTA_DNPRC}"
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
-            response = await self._realizar_consulta_con_reintentos(url, params, headers)
-
-            # Parsear respuesta JSON (la nueva API devuelve JSON)
-            datos_parseados = self._parsear_respuesta_json(response.text)
-
-            # Construir respuesta estructurada
-            return self._construir_respuesta_catastral(ref_validada.referencia, datos_parseados)
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error consultando por referencia",
-                e,
-            )
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "Referencia consultada: %s",
-                referencia,
-            )
+    async def consultar_parcela_por_codigo(
+        self, codigo_parcela: str, incluir_raw: bool = False
+    ) -> CatastroResponse:
+        ref = ReferenciaCatastral.normalizar(codigo_parcela)
+        if not ReferenciaCatastral.analizar_referencia_detallado(ref)["es_codigo_parcela"]:
             return CatastroResponse(
-                referencia_catastral=referencia, estado_consulta="error", mensaje_error=str(e)
+                referencia_catastral=ref,
+                estado_consulta="error_formato",
+                codigo_error="ENTRADA_INVALIDA",
+                mensaje_error="Código de parcela inválido",
             )
-
-    async def consultar_por_coordenadas(self, latitud: float, longitud: float) -> CatastroResponse:
-        """
-        Consulta datos catastrales por coordenadas geográficas usando la nueva API WCF
-
-        Args:
-            latitud: Latitud en grados decimales
-            longitud: Longitud en grados decimales
-
-        Returns:
-            CatastroResponse con los datos encontrados
-        """
         try:
-            # Validar coordenadas
-            coords = Coordenadas(latitud=latitud, longitud=longitud)
+            return await self._consultar_referencia(ref, "parcela", incluir_raw)
+        except Exception as exc:
+            return self._error(ref, exc)
 
-            # Preparar parámetros para la consulta de coordenadas
-            params = {
-                "SRS": "EPSG:4326",  # WGS84
-                "Coordenada_X": str(coords.longitud),
-                "Coordenada_Y": str(coords.latitud),
+    async def _consultar_referencia(
+        self, ref: str, kind: str, incluir_raw: bool
+    ) -> CatastroResponse:
+        raw = await self._request(
+            CatastroEndpoints.CONSULTA_DNPRC, {"Provincia": "", "Municipio": "", "RefCat": ref}
+        )
+        return self._construir_respuesta_catastral(ref, raw, kind, incluir_raw)
+
+    async def _request(self, endpoint: str, params: dict[str, str]) -> dict:
+        response = await self._realizar_consulta_con_reintentos(self.base_url + endpoint, params)
+        return self._parsear_respuesta_json(response.text)
+
+    def _parsear_respuesta_json(self, content: str) -> dict:
+        try:
+            data = json.loads(content.lstrip("\ufeff"))
+        except json.JSONDecodeError:
+            return self._parsear_respuesta_xml(content)
+        if not isinstance(data, dict):
+            raise ValueError("Respuesta JSON inesperada del Catastro")
+        return data
+
+    def _parsear_respuesta_xml(self, content: str) -> dict:
+        try:
+            root = ET.fromstring(content)
+            if root.tag.rsplit("}", 1)[-1].lower() not in {"consulta_dnp", "consulta_coordenadas"}:
+                raise ValueError("Error parseando respuesta: raíz XML inesperada")
+            return self._xml_a_dict(root)
+        except (ET.ParseError, DefusedXmlException) as exc:
+            raise ValueError("Error parseando respuesta del Catastro") from exc
+
+    def _xml_a_dict(self, element) -> Any:
+        if not len(element):
+            return element.text.strip() if element.text and element.text.strip() else {}
+        result: dict = {}
+        for child in element:
+            key = child.tag.rsplit("}", 1)[-1]
+            value = self._xml_a_dict(child)
+            if key in result:
+                result[key] = as_list(result[key]) + [value]
+            else:
+                result[key] = value
+        return result
+
+    @staticmethod
+    def _root(raw: dict) -> dict:
+        wrapped = [value for key, value in raw.items() if key.lower().endswith("result")]
+        root = wrapped[0] if len(wrapped) == 1 else raw
+        if not isinstance(root, dict) or not any(
+            key in root for key in ("control", "bico", "lrcdnp", "coordenadas", "lerr")
+        ):
+            raise ValueError("Estructura de respuesta del Catastro no reconocida")
+        return root
+
+    def _provider_error(self, root: dict, ref: str) -> CatastroResponse | None:
+        errors = root.get("lerr")
+        if isinstance(errors, dict):
+            errors = errors.get("err", errors)
+        errors = [
+            {
+                "codigo": str(e.get("cod", "DESCONOCIDO")),
+                "mensaje": str(e.get("des", "Error del Catastro")),
             }
+            for e in as_list(errors)
+        ]
+        if not errors and int(root.get("control", {}).get("cuerr", 0)) > 0:
+            errors = [
+                {"codigo": "DESCONOCIDO", "mensaje": "Catastro informó de un error sin detalle"}
+            ]
+        if not errors:
+            return None
+        codes = {error["codigo"] for error in errors}
+        status = (
+            "sin_datos"
+            if codes <= {"5", "16"}
+            else "error_formato" if codes <= {"4", "76", "77"} else "error"
+        )
+        return CatastroResponse(
+            referencia_catastral=ref,
+            estado_consulta=status,
+            codigo_error=errors[0]["codigo"],
+            errores_origen=errors,
+            mensaje_error="; ".join(error["mensaje"] for error in errors),
+        )
 
-            # Realizar consulta a la nueva API de coordenadas
-            url = f"{self.base_url}{CatastroEndpoints.CONSULTA_RCCOOR}"
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
-            response = await self._realizar_consulta_con_reintentos(url, params, headers)
-
-            # Parsear respuesta JSON
-            datos_parseados = self._parsear_respuesta_json(response.text)
-
-            # Extraer referencia catastral de la respuesta
-            referencia = self._extraer_referencia_de_coordenadas(datos_parseados)
-
-            # Si encontramos referencia, hacer consulta completa de datos
-            if referencia and referencia != "DESCONOCIDA":
-                resultado_completo = await self.consultar_por_referencia(referencia)
-                resultado_completo.coordenadas = coords
-                return resultado_completo
-
-            # Si no hay referencia, devolver respuesta básica
-            return CatastroResponse(
-                referencia_catastral="DESCONOCIDA",
-                estado_consulta="sin_datos",
-                mensaje_error="No se encontró inmueble en las coordenadas especificadas",
-                coordenadas=coords,
-                datos_raw=datos_parseados,
+    def _construir_respuesta_catastral(
+        self, referencia: str, datos_raw: dict, kind: str = "inmueble", incluir_raw: bool = False
+    ) -> CatastroResponse:
+        try:
+            root = self._root(datos_raw)
+            failure = self._provider_error(root, referencia)
+            if failure:
+                failure.datos_raw = datos_raw if incluir_raw else None
+                return failure
+            if root.get("bico"):
+                bico = root["bico"]
+                items = [self._inmueble(bico["bi"], bico)]
+            elif root.get("lrcdnp"):
+                items = [self._inmueble(item) for item in as_list(root["lrcdnp"].get("rcdnp"))]
+            elif int(root.get("control", {}).get("cudnp", 0)) > 0:
+                raise ValueError("Respuesta con inmuebles pero sin datos reconocibles")
+            else:
+                items = []
+            individual = items[0] if len(items) == 1 else None
+            result = CatastroResponse(
+                referencia_catastral=referencia,
+                estado_consulta="exitosa" if items else "sin_datos",
+                tipo_resultado=kind,
+                inmuebles=items,
+                total_inmuebles=len(items),
+                requiere_seleccion=len(items) > 1,
+                datos_basicos=individual.datos_basicos if individual else None,
+                direccion=individual.direccion if individual else None,
+                datos_raw=datos_raw if incluir_raw else None,
             )
+            expected = int(root.get("control", {}).get("cudnp", len(items)))
+            if expected != len(items):
+                result.advertencias.append(
+                    f"Catastro anuncia {expected} inmuebles; se recibieron {len(items)}"
+                )
+            return result
+        except Exception as exc:
+            result = self._error(referencia, exc)
+            result.codigo_error = "RESPUESTA_INVALIDA"
+            result.datos_raw = datos_raw if incluir_raw else None
+            return result
 
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error consultando por coordenadas",
-                e,
+    @staticmethod
+    def _inmueble(bi: dict, bico: dict | None = None) -> InmuebleCatastral:
+        bico = bico or {}
+        rc = bi.get("rc") or bi.get("idbi", {}).get("rc", {})
+        reference = "".join(str(rc.get(key, "")) for key in ("pc1", "pc2", "car", "cc1", "cc2"))
+        if not ReferenciaCatastral.validar_formato_estatico(reference):
+            raise ValueError("Inmueble sin referencia completa en la respuesta")
+        dt = bi.get("dt", {})
+        locs = dt.get("locs", {})
+        location = locs.get("lous") or locs.get("lors") or {}
+        urban = location.get("lourb", {})
+        rural = location.get("lorus", {})
+        road, interior = urban.get("dir", {}), urban.get("loint", {})
+        ine = dt.get("loine", {})
+
+        def optional(value):
+            return str(value).strip() if value is not None and value != "" else None
+
+        street = " ".join(str(road.get(k, "")) for k in ("tv", "nv")).strip() or None
+        address = DireccionCatastral(
+            via=street,
+            numero=optional(road.get("pnp")),
+            bloque=optional(road.get("bq")),
+            escalera=optional(interior.get("es")),
+            planta=optional(interior.get("pt")),
+            puerta=optional(interior.get("pu")),
+            codigo_postal=optional(urban.get("dp")),
+            texto_completo=optional(bi.get("ldt")),
+            municipio=optional(dt.get("nm")),
+            provincia=optional(dt.get("np")),
+            provincia_codigo_ine=optional(ine.get("cp")),
+            municipio_codigo_ine=optional(ine.get("cm")),
+            municipio_codigo_catastro=optional(dt.get("cmc")),
+            poligono=optional(rural.get("cpp", {}).get("cpo")),
+            parcela_rustica=optional(rural.get("cpp", {}).get("cpa")),
+            paraje=optional(rural.get("npa")),
+        )
+        debi = bi.get("debi", {})
+        data = DatosBasicosInmueble(
+            uso=debi.get("luso"),
+            superficie_construida=number(debi.get("sfc")),
+            antiguedad=int(debi["ant"]) if debi.get("ant") else None,
+            superficie_suelo=number(bico.get("finca", {}).get("dff", {}).get("ss")),
+        )
+        constructions = bico.get("lcons")
+        if isinstance(constructions, dict):
+            constructions = constructions.get("cons", constructions)
+        parts = []
+        for part in as_list(constructions):
+            interior = part.get("dt", {}).get("lourb", {}).get("loint", {})
+            parts.append(
+                ConstruccionCatastral(
+                    uso=part.get("lcd"),
+                    superficie=number(part.get("dfcons", {}).get("stl")),
+                    escalera=optional(interior.get("es")),
+                    planta=optional(interior.get("pt")),
+                    puerta=optional(interior.get("pu")),
+                )
             )
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "Coordenadas consultadas: latitud=%s longitud=%s",
-                latitud,
-                longitud,
-            )
-            return CatastroResponse(
-                referencia_catastral="DESCONOCIDA",
-                estado_consulta="error",
-                mensaje_error=str(e),
-                coordenadas=Coordenadas(latitud=latitud, longitud=longitud),
-            )
+        return InmuebleCatastral(
+            referencia_catastral=reference,
+            datos_basicos=data,
+            direccion=address,
+            coeficiente_participacion=number(debi.get("cpt")),
+            construcciones=parts,
+        )
 
     async def _realizar_consulta_con_reintentos(
         self,
@@ -246,397 +380,79 @@ class CatastroService:
                 else:
                     raise
 
-    def _parsear_respuesta_json(self, json_content: str) -> Dict[str, Any]:
-        """Parsea la respuesta JSON de la nueva API WCF"""
-        try:
-            import json
+    async def consultar_por_coordenadas(self, latitud: float, longitud: float) -> CatastroResponse:
+        """
+        Consulta datos catastrales por coordenadas geográficas usando la nueva API WCF
 
-            datos = json.loads(json_content)
-            return datos
-        except json.JSONDecodeError as e:
+        Args:
+            latitud: Latitud en grados decimales
+            longitud: Longitud en grados decimales
+
+        Returns:
+            CatastroResponse con los datos encontrados
+        """
+        try:
+            # Validar coordenadas
+            coords = Coordenadas(latitud=latitud, longitud=longitud)
+
+            # Preparar parámetros para la consulta de coordenadas
+            params = {
+                "SRS": "EPSG:4326",  # WGS84
+                "Coordenada_X": str(coords.longitud),
+                "Coordenada_Y": str(coords.latitud),
+            }
+
+            # Realizar consulta a la nueva API de coordenadas
+            url = f"{self.base_url}{CatastroEndpoints.CONSULTA_RCCOOR}"
+
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            response = await self._realizar_consulta_con_reintentos(url, params, headers)
+
+            # Parsear respuesta JSON
+            datos_parseados = self._parsear_respuesta_json(response.text)
+
+            # Extraer referencia catastral de la respuesta
+            referencia = self._extraer_referencia_de_coordenadas(datos_parseados)
+
+            # Si encontramos referencia, hacer consulta completa de datos
+            if referencia and referencia != "DESCONOCIDA":
+                resultado_completo = await self.consultar_por_referencia(referencia)
+                resultado_completo.coordenadas = coords
+                return resultado_completo
+
+            # Si no hay referencia, devolver respuesta básica
+            return CatastroResponse(
+                referencia_catastral="DESCONOCIDA",
+                estado_consulta="sin_datos",
+                mensaje_error="No se encontró inmueble en las coordenadas especificadas",
+                coordenadas=coords,
+                datos_raw=datos_parseados,
+            )
+
+        except Exception as e:
             log_failure(
                 logger,
                 logging.ERROR,
                 self.settings.log_sensitive_data,
-                "Error parseando respuesta JSON",
+                "Error consultando por coordenadas",
                 e,
             )
             log_sensitive(
                 logger,
                 self.settings.log_sensitive_data,
-                "JSON recibido: %.500s",
-                json_content,
-            )
-            # Fallback a XML si JSON falla
-            return self._parsear_respuesta_xml(json_content)
-
-    def _parsear_respuesta_xml(self, xml_content: str) -> Dict[str, Any]:
-        """Parsea la respuesta XML del Catastro (fallback)"""
-        try:
-            # Limpiar y parsear XML
-            xml_limpio = xml_content.replace('<?xml version="1.0" encoding="UTF-8"?>', "")
-            root = ET.fromstring(xml_limpio)
-
-            # Convertir XML a diccionario
-            return self._xml_a_dict(root)
-
-        except (ET.ParseError, DefusedXmlException) as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error parseando respuesta XML",
-                e,
-            )
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "XML recibido: %.500s",
-                xml_content,
-            )
-            raise ValueError("Error parseando respuesta del Catastro")
-
-    def _xml_a_dict(self, element) -> Dict[str, Any]:
-        """Convierte un elemento XML a diccionario"""
-        result = {}
-
-        # Atributos del elemento
-        if element.attrib:
-            result.update(element.attrib)
-
-        # Texto del elemento
-        if element.text and element.text.strip():
-            if len(element) == 0:  # Es un elemento hoja
-                return element.text.strip()
-            else:
-                result["_text"] = element.text.strip()
-
-        # Elementos hijos
-        for child in element:
-            child_data = self._xml_a_dict(child)
-
-            if child.tag in result:
-                # Si ya existe, convertir a lista
-                if not isinstance(result[child.tag], list):
-                    result[child.tag] = [result[child.tag]]
-                result[child.tag].append(child_data)
-            else:
-                result[child.tag] = child_data
-
-        return result
-
-    def _construir_respuesta_catastral(
-        self, referencia: str, datos_raw: Dict[str, Any]
-    ) -> CatastroResponse:
-        """Construye una respuesta estructurada a partir de los datos del Catastro usando estructura oficial"""
-
-        try:
-            consulta_result = datos_raw.get("consulta_dnprcResult", {})
-
-            # Detectar el tipo de estructura según el contenido
-            if "lrcdnp" in consulta_result:
-                # Estructura para consultas con 14 caracteres (múltiples inmuebles)
-                return self._procesar_respuesta_multiple_inmuebles(
-                    referencia, consulta_result, datos_raw
-                )
-            elif "bico" in consulta_result:
-                # Estructura para consultas con 20 caracteres (inmueble específico)
-                return self._procesar_respuesta_inmueble_individual(
-                    referencia, consulta_result, datos_raw
-                )
-            else:
-                return CatastroResponse(
-                    referencia_catastral=referencia,
-                    estado_consulta="sin_datos",
-                    mensaje_error="No se encontraron datos para esta referencia catastral",
-                    datos_raw=datos_raw,
-                )
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error construyendo respuesta",
-                e,
+                "Coordenadas consultadas: latitud=%s longitud=%s",
+                latitud,
+                longitud,
             )
             return CatastroResponse(
-                referencia_catastral=referencia,
+                referencia_catastral="DESCONOCIDA",
                 estado_consulta="error",
-                mensaje_error=f"Error procesando datos: {str(e)}",
-                datos_raw=datos_raw,
+                mensaje_error=str(e),
+                coordenadas=Coordenadas(latitud=latitud, longitud=longitud),
             )
-
-    def _procesar_respuesta_inmueble_individual(
-        self, referencia: str, consulta_result: Dict[str, Any], datos_raw: Dict[str, Any]
-    ) -> CatastroResponse:
-        """Procesa respuesta para inmueble individual (referencia de 20 caracteres)"""
-        try:
-            bico = consulta_result.get("bico", {})
-            bi = bico.get("bi", {})
-
-            if not bi:
-                return CatastroResponse(
-                    referencia_catastral=referencia,
-                    estado_consulta="sin_datos",
-                    mensaje_error="No se encontraron datos del inmueble",
-                    datos_raw=datos_raw,
-                )
-
-            # Extraer datos básicos
-            debi = bi.get("debi", {})
-            uso = debi.get("luso", debi.get("uso"))
-            superficie = debi.get("sfc")
-            antiguedad = debi.get("ant")
-
-            # Convertir tipos
-            superficie_num = None
-            if superficie:
-                try:
-                    superficie_num = float(str(superficie).replace(",", "."))
-                except ValueError, TypeError:
-                    pass
-
-            antiguedad_num = None
-            if antiguedad:
-                try:
-                    antiguedad_num = int(antiguedad)
-                except ValueError, TypeError:
-                    pass
-
-            datos_basicos = DatosBasicosInmueble(
-                uso=uso, superficie_construida=superficie_num, antiguedad=antiguedad_num
-            )
-
-            # Extraer dirección
-            dt = bi.get("dt", {})
-            provincia_nombre = dt.get("np", "")
-            municipio_nombre = dt.get("nm", "")
-
-            # Información de ubicación
-            locs = dt.get("locs", {})
-            lous = locs.get("lous", {})
-            lourb = lous.get("lourb", {})
-
-            # Vía
-            dir_info = lourb.get("dir", {})
-            tipo_via = dir_info.get("tv", "")
-            nombre_via = dir_info.get("nv", "")
-
-            # Información interior
-            loint = lourb.get("loint", {})
-            planta = loint.get("pt", "")
-            puerta = loint.get("pu", "")
-
-            direccion = DireccionCatastral()
-            if tipo_via and nombre_via:
-                direccion.via = f"{tipo_via} {nombre_via}"
-            direccion.planta = planta if planta else None
-            direccion.puerta = puerta if puerta else None
-            direccion.municipio = municipio_nombre
-            direccion.provincia = provincia_nombre
-
-            return CatastroResponse(
-                referencia_catastral=referencia,
-                datos_basicos=datos_basicos,
-                direccion=direccion,
-                valores=None,
-                estado_consulta="exitosa",
-                datos_raw=datos_raw,
-            )
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error procesando inmueble",
-                e,
-            )
-            return CatastroResponse(
-                referencia_catastral=referencia,
-                estado_consulta="error",
-                mensaje_error=f"Error procesando datos del inmueble: {str(e)}",
-                datos_raw=datos_raw,
-            )
-
-    def _procesar_respuesta_multiple_inmuebles(
-        self, referencia: str, consulta_result: Dict[str, Any], datos_raw: Dict[str, Any]
-    ) -> CatastroResponse:
-        """Procesa respuesta para múltiples inmuebles (referencia de 14 caracteres)"""
-        try:
-            lrcdnp = consulta_result.get("lrcdnp", {})
-            rcdnp_data = lrcdnp.get("rcdnp", {})
-
-            if isinstance(rcdnp_data, list) and rcdnp_data:
-                # Tomar el primer inmueble para la respuesta legacy
-                inmueble_data = rcdnp_data[0]
-            elif isinstance(rcdnp_data, dict):
-                inmueble_data = rcdnp_data
-            else:
-                return CatastroResponse(
-                    referencia_catastral=referencia,
-                    estado_consulta="sin_datos",
-                    mensaje_error="No se encontraron datos para esta referencia catastral",
-                    datos_raw=datos_raw,
-                )
-
-            # Procesar usando la función oficial
-            inmueble_procesado = self._procesar_inmueble_catastro_oficial(inmueble_data)
-
-            if not inmueble_procesado:
-                return CatastroResponse(
-                    referencia_catastral=referencia,
-                    estado_consulta="error",
-                    mensaje_error="Error procesando datos del inmueble",
-                    datos_raw=datos_raw,
-                )
-
-            # Convertir a estructura legacy
-            datos_basicos = DatosBasicosInmueble(
-                uso=inmueble_procesado.get("uso"),
-                superficie_construida=(
-                    float(inmueble_procesado.get("superficie", "0").replace(",", "."))
-                    if inmueble_procesado.get("superficie", "")
-                    .replace(",", ".")
-                    .replace(".", "")
-                    .isdigit()
-                    else None
-                ),
-                antiguedad=(
-                    int(inmueble_procesado.get("antiguedad", "0"))
-                    if inmueble_procesado.get("antiguedad", "").isdigit()
-                    else None
-                ),
-            )
-
-            direccion = DireccionCatastral()
-            direccion_texto = inmueble_procesado.get("direccion", "")
-            if direccion_texto:
-                partes = direccion_texto.split(", ")
-                if partes:
-                    direccion.via = partes[0]
-                    direccion.planta = next(
-                        (p.replace("Planta ", "") for p in partes if "Planta" in p), None
-                    )
-                    direccion.puerta = next(
-                        (p.replace("Puerta ", "") for p in partes if "Puerta" in p), None
-                    )
-
-                direccion.municipio = inmueble_procesado.get("municipio", "").split(" (")[0]
-                direccion.provincia = inmueble_procesado.get("provincia", "").split(" (")[0]
-
-            return CatastroResponse(
-                referencia_catastral=referencia,
-                datos_basicos=datos_basicos,
-                direccion=direccion,
-                valores=None,
-                estado_consulta="exitosa",
-                datos_raw=datos_raw,
-            )
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error procesando inmuebles",
-                e,
-            )
-            return CatastroResponse(
-                referencia_catastral=referencia,
-                estado_consulta="error",
-                mensaje_error=f"Error procesando datos: {str(e)}",
-                datos_raw=datos_raw,
-            )
-
-    def _extraer_datos_basicos(self, datos: Dict[str, Any]) -> Optional[DatosBasicosInmueble]:
-        """Extrae datos básicos del inmueble de la respuesta del Catastro"""
-        try:
-            # Buscar en diferentes estructuras posibles
-            bico = datos.get("consulta_dnp", {}).get("bico", {})
-            bi = bico.get("bi", {}) if isinstance(bico, dict) else {}
-            debi = bi.get("debi", {}) if isinstance(bi, dict) else {}
-
-            if not debi:
-                return None
-
-            # Extraer datos
-            uso = debi.get("luso", debi.get("uso"))
-            superficie = debi.get("sfc")
-            antiguedad = debi.get("ant")
-
-            # Convertir tipos
-            superficie_num = None
-            if superficie:
-                try:
-                    superficie_num = float(superficie)
-                except ValueError, TypeError:
-                    pass
-
-            antiguedad_num = None
-            if antiguedad:
-                try:
-                    antiguedad_num = int(antiguedad)
-                except ValueError, TypeError:
-                    pass
-
-            return DatosBasicosInmueble(
-                uso=uso, superficie_construida=superficie_num, antiguedad=antiguedad_num
-            )
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error extrayendo datos básicos",
-                e,
-            )
-            return None
-
-    def _extraer_direccion(self, datos: Dict[str, Any]) -> Optional[DireccionCatastral]:
-        """Extrae la dirección del inmueble de la respuesta del Catastro"""
-        try:
-            # Buscar datos de dirección en la estructura
-            bico = datos.get("consulta_dnp", {}).get("bico", {})
-            bi = bico.get("bi", {}) if isinstance(bico, dict) else {}
-
-            if not bi:
-                return None
-
-            # Extraer datos de dirección
-            via = bi.get("tv", "") + " " + bi.get("nv", "")
-            numero = bi.get("num")
-
-            return DireccionCatastral(via=via.strip() if via.strip() else None, numero=numero)
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error extrayendo dirección",
-                e,
-            )
-            return None
-
-    def _extraer_valores(self, datos: Dict[str, Any]) -> Optional[ValorCatastral]:
-        """Extrae valores catastrales de la respuesta del Catastro"""
-        try:
-            # Los valores catastrales no siempre están disponibles en todas las consultas
-            # Esto dependería de la estructura específica de la respuesta
-            return None
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error extrayendo valores",
-                e,
-            )
-            return None
 
     def _extraer_referencia_de_coordenadas(self, datos: Dict[str, Any]) -> str:
         """Extrae la referencia catastral de una consulta por coordenadas usando estructura oficial"""
@@ -819,444 +635,3 @@ la referencia catastral obtenida con nuestras herramientas MCP.
                 ],
             },
         )
-
-    async def consultar_parcela_por_codigo(self, codigo_parcela: str) -> CatastroResponse:
-        """
-        Consulta información de parcela usando código de 14 caracteres
-
-        Args:
-            codigo_parcela: Código de parcela de 14 caracteres (sin subparcela ni dígitos de control)
-
-        Returns:
-            CatastroResponse con información de la parcela y sus inmuebles
-        """
-        try:
-            # Limpiar y validar el código de parcela
-            codigo_limpio = codigo_parcela.replace(" ", "").upper()
-
-            # Verificar longitud y formato
-            if len(codigo_limpio) != 14:
-                mensaje_error = f"""
-CODIGO DE PARCELA INVALIDO
-
-El codigo proporcionado '{codigo_parcela}' tiene {len(codigo_limpio)} caracteres.
-Se requieren exactamente 14 caracteres.
-
-ESTRUCTURA DEL CODIGO DE PARCELA (14 caracteres):
-- Posiciones 1-2: PROVINCIA (ej: 23)
-- Posiciones 3-5: MUNICIPIO (ej: 145)  
-- Posiciones 6-7: SECTOR (ej: 01)
-- Posiciones 8-10: MANZANA (ej: EG1)
-- Posiciones 11-14: PARCELA (ej: 421S)
-
-EJEMPLO VALIDO: 2314501EG1421S
-
-PARA OBTENER EL CODIGO CORRECTO:
-1. Visita https://sede.catastro.gob.es
-2. Busca por direccion
-3. Usa los primeros 14 caracteres de la referencia catastral
-                """.strip()
-
-                return CatastroResponse(
-                    referencia_catastral=codigo_parcela,
-                    estado_consulta="error_formato",
-                    mensaje_error=mensaje_error,
-                )
-
-            # Verificar caracteres válidos
-            if not codigo_limpio.isalnum():
-                return CatastroResponse(
-                    referencia_catastral=codigo_parcela,
-                    estado_consulta="error_formato",
-                    mensaje_error=f"El código de parcela solo puede contener números y letras. Código recibido: '{codigo_parcela}'",
-                )
-
-            logger.info("Consulta de parcela solicitada")
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "Código de parcela consultado: %s",
-                codigo_limpio,
-            )
-
-            # Intentar buscar inmuebles en esta parcela usando la API de búsqueda por coordenadas
-            # Como alternativa, podemos buscar usando los componentes del código
-            resultado = await self._buscar_inmuebles_en_parcela(codigo_limpio)
-
-            return resultado
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error consultando parcela",
-                e,
-            )
-            log_sensitive(
-                logger, self.settings.log_sensitive_data, "Código de parcela: %s", codigo_parcela
-            )
-            return CatastroResponse(
-                referencia_catastral=codigo_parcela, estado_consulta="error", mensaje_error=str(e)
-            )
-
-    async def _buscar_inmuebles_en_parcela(self, codigo_parcela: str) -> CatastroResponse:
-        """
-        Busca inmuebles dentro de una parcela usando el código de 14 caracteres
-        SEGÚN LA DOCUMENTACIÓN OFICIAL: usar referencia de 14 chars devuelve TODOS los inmuebles automáticamente
-        """
-        try:
-            # Extraer componentes del código para información
-            provincia = codigo_parcela[:2]
-            municipio = codigo_parcela[2:5]
-            sector = codigo_parcela[5:7]
-            manzana = codigo_parcela[7:10]
-            parcela = codigo_parcela[10:14]
-
-            logger.info("Consulta completa de parcela iniciada")
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "Parcela=%s provincia=%s municipio=%s sector=%s manzana=%s componente=%s",
-                codigo_parcela,
-                provincia,
-                municipio,
-                sector,
-                manzana,
-                parcela,
-            )
-
-            # MÉTODO OFICIAL: Usar directamente Consulta_DNPRC con 14 caracteres
-            # Según la documentación: "cuando introduces una referencia catastral de 14 caracteres,
-            # el sistema interpreta que quieres la unidad base o raíz de la finca,
-            # y devuelve todos los elementos asociados"
-
-            params = {
-                "Provincia": "",
-                "Municipio": "",
-                "RefCat": codigo_parcela,  # Usar directamente el código de 14 caracteres
-            }
-
-            url = f"{self.base_url}{CatastroEndpoints.CONSULTA_DNPRC}"
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
-            response = await self._realizar_consulta_con_reintentos(url, params, headers)
-
-            # Parsear respuesta JSON
-            datos_parseados = self._parsear_respuesta_json(response.text)
-            log_sensitive(
-                logger,
-                self.settings.log_sensitive_data,
-                "Respuesta de la API: %r",
-                datos_parseados,
-            )
-
-            # Analizar respuesta para múltiples inmuebles
-            inmuebles_encontrados = self._extraer_inmuebles_division_horizontal(datos_parseados)
-
-            # Construir respuesta
-            if inmuebles_encontrados:
-                mensaje_resultado = f"""
-PARCELA CON DIVISION HORIZONTAL ENCONTRADA
-
-Codigo de parcela: {codigo_parcela}
-Inmuebles encontrados: {len(inmuebles_encontrados)}
-
-DETALLES DE LA PARCELA:
-- Provincia: {provincia}
-- Municipio: {municipio}  
-- Sector: {sector}
-- Manzana: {manzana}
-- Parcela: {parcela}
-
-INMUEBLES EN LA PARCELA:
-                """.strip()
-
-                for i, inmueble in enumerate(inmuebles_encontrados, 1):
-                    ref = inmueble.get("referencia_catastral", "No disponible")
-                    subparcela = inmueble.get("subparcela", "N/A")
-                    uso = inmueble.get("uso", "No especificado")
-                    superficie = inmueble.get("superficie", "No especificada")
-                    direccion = inmueble.get("direccion", "No especificada")
-                    antiguedad = inmueble.get("antiguedad", "No especificada")
-                    coeficiente = inmueble.get("coeficiente_participacion", "No especificado")
-                    mensaje_resultado += f"\n\n{i}. INMUEBLE {subparcela}:"
-                    mensaje_resultado += f"\n   - Referencia completa: {ref}"
-                    if direccion and direccion != "No especificada":
-                        mensaje_resultado += f"\n   - Ubicacion: {direccion}"
-                    if uso and uso != "No especificado":
-                        mensaje_resultado += f"\n   - Uso: {uso}"
-                    if superficie and superficie != "No especificada":
-                        mensaje_resultado += f"\n   - Superficie: {superficie} m2"
-                    if coeficiente and coeficiente != "No especificado":
-                        mensaje_resultado += f"\n   - Coeficiente participacion: {coeficiente}%"
-                    if antiguedad and antiguedad != "No especificada":
-                        mensaje_resultado += f"\n   - Año construccion: {antiguedad}"
-
-                mensaje_resultado += f"""
-
-RECOMENDACIONES:
-- Para consultar un inmueble especifico use: consultar_catastro_por_referencia
-- Para mas inmuebles en esta parcela visite: https://sede.catastro.gob.es
-- Busque por el codigo de parcela: {codigo_parcela}
-                """.strip()
-
-                return CatastroResponse(
-                    referencia_catastral=codigo_parcela,
-                    estado_consulta="exitosa",
-                    mensaje_error=mensaje_resultado,
-                    datos_raw={
-                        "tipo_consulta": "parcela_con_division_horizontal",
-                        "codigo_parcela": codigo_parcela,
-                        "metodo_api": "Consulta_DNPRC con 14 caracteres (oficial)",
-                        "componentes": {
-                            "provincia": provincia,
-                            "municipio": municipio,
-                            "sector": sector,
-                            "manzana": manzana,
-                            "parcela": parcela,
-                        },
-                        "inmuebles_encontrados": inmuebles_encontrados,
-                        "total_inmuebles": len(inmuebles_encontrados),
-                        "respuesta_api_original": datos_parseados,
-                    },
-                )
-            else:
-                # No se encontraron inmuebles
-                mensaje_info = f"""
-PARCELA NO ENCONTRADA O SIN INMUEBLES
-
-Codigo de parcela: {codigo_parcela}
-
-Se intento buscar inmuebles en esta parcela pero no se encontraron resultados.
-
-COMPONENTES ANALIZADOS:
-- Provincia: {provincia}
-- Municipio: {municipio}
-- Sector: {sector}  
-- Manzana: {manzana}
-- Parcela: {parcela}
-
-POSIBLES CAUSAS:
-1. La parcela no existe en el catastro
-2. La parcela no tiene inmuebles registrados
-3. El codigo proporcionado es incorrecto
-4. Los inmuebles usan subparcelas diferentes a las probadas
-
-ALTERNATIVAS:
-1. Verificar el codigo en https://sede.catastro.gob.es
-2. Usar la referencia catastral completa (20 caracteres) si la tiene
-3. Buscar por direccion en la sede electronica
-4. Usar coordenadas GPS si conoce la ubicacion exacta
-                """.strip()
-
-                return CatastroResponse(
-                    referencia_catastral=codigo_parcela,
-                    estado_consulta="sin_datos",
-                    mensaje_error=mensaje_info,
-                    datos_raw={
-                        "tipo_consulta": "parcela_sin_resultados",
-                        "codigo_parcela": codigo_parcela,
-                        "componentes": {
-                            "provincia": provincia,
-                            "municipio": municipio,
-                            "sector": sector,
-                            "manzana": manzana,
-                            "parcela": parcela,
-                        },
-                    },
-                )
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.ERROR,
-                self.settings.log_sensitive_data,
-                "Error buscando inmuebles en parcela",
-                e,
-            )
-            log_sensitive(
-                logger, self.settings.log_sensitive_data, "Código de parcela: %s", codigo_parcela
-            )
-            return CatastroResponse(
-                referencia_catastral=codigo_parcela,
-                estado_consulta="error",
-                mensaje_error=f"Error interno buscando inmuebles en la parcela: {str(e)}",
-            )
-
-    def _extraer_inmuebles_division_horizontal(self, datos: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Extrae información de múltiples inmuebles en una parcela con división horizontal
-        Procesa la estructura real de la API: consulta_dnprcResult.lrcdnp.rcdnp[]
-        """
-        inmuebles = []
-
-        try:
-            # Estructura real de la API del Catastro para consultas con múltiples inmuebles
-            consulta_result = datos.get("consulta_dnprcResult", {})
-            lrcdnp = consulta_result.get("lrcdnp", {})
-            rcdnp_array = lrcdnp.get("rcdnp", [])
-
-            if isinstance(rcdnp_array, list):
-                for inmueble_data in rcdnp_array:
-                    inmueble_info = self._procesar_inmueble_catastro_oficial(inmueble_data)
-                    if inmueble_info:
-                        inmuebles.append(inmueble_info)
-            elif isinstance(rcdnp_array, dict):
-                # Un solo inmueble
-                inmueble_info = self._procesar_inmueble_catastro_oficial(rcdnp_array)
-                if inmueble_info:
-                    inmuebles.append(inmueble_info)
-
-            logger.info("Inmuebles extraídos de la respuesta oficial cantidad=%d", len(inmuebles))
-            return inmuebles
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error extrayendo inmuebles",
-                e,
-            )
-            return []
-
-    def _procesar_inmueble_individual(self, bi_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Procesa los datos de un inmueble individual
-        """
-        try:
-            # Extraer referencia catastral
-            referencia = ""
-            if "idbi" in bi_data:
-                referencia = bi_data["idbi"].get("rc", "")
-
-            # Extraer datos básicos
-            debi = bi_data.get("debi", {})
-            uso = debi.get("luso", debi.get("uso", "No especificado"))
-            superficie = debi.get("sfc", "No especificada")
-            antiguedad = debi.get("ant", "No especificada")
-
-            # Extraer dirección
-            via = bi_data.get("tv", "") + " " + bi_data.get("nv", "")
-            numero = bi_data.get("num", "")
-            planta = bi_data.get("planta", "")
-            puerta = bi_data.get("puerta", "")
-
-            direccion_completa = f"{via.strip()} {numero}".strip()
-            if planta:
-                direccion_completa += f", Planta {planta}"
-            if puerta:
-                direccion_completa += f", Puerta {puerta}"
-
-            return {
-                "referencia_catastral": referencia,
-                "uso": uso,
-                "superficie": superficie,
-                "antiguedad": antiguedad,
-                "direccion": direccion_completa,
-                "datos_raw": bi_data,
-            }
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error procesando inmueble individual",
-                e,
-            )
-            return None
-
-    def _procesar_inmueble_catastro_oficial(
-        self, rcdnp_data: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Procesa los datos de un inmueble según la estructura oficial de la API
-        Estructura: rcdnp{ rc{}, dt{}, debi{} }
-        """
-        try:
-            # Extraer referencia catastral completa
-            rc = rcdnp_data.get("rc", {})
-            pc1 = rc.get("pc1", "")  # Primeros 7 caracteres
-            pc2 = rc.get("pc2", "")  # Siguientes 7 caracteres
-            car = rc.get("car", "")  # Subparcela (4 caracteres)
-            cc1 = rc.get("cc1", "")  # Control 1
-            cc2 = rc.get("cc2", "")  # Control 2
-
-            referencia_completa = f"{pc1}{pc2}{car}{cc1}{cc2}"
-
-            # Extraer datos básicos del inmueble
-            debi = rcdnp_data.get("debi", {})
-            uso = debi.get("luso", "No especificado")
-            superficie = debi.get("sfc", "No especificada")
-            antiguedad = debi.get("ant", "No especificada")
-            coeficiente = debi.get("cpt", "No especificado")
-
-            # Extraer datos de ubicación
-            dt = rcdnp_data.get("dt", {})
-
-            # Provincia y municipio
-            loine = dt.get("loine", {})
-            provincia_codigo = loine.get("cp", "")
-            municipio_codigo = loine.get("cm", "")
-            provincia_nombre = dt.get("np", "")
-            municipio_nombre = dt.get("nm", "")
-
-            # Dirección
-            locs = dt.get("locs", {})
-            lous = locs.get("lous", {})
-            lourb = lous.get("lourb", {})
-
-            # Vía
-            dir_info = lourb.get("dir", {})
-            tipo_via = dir_info.get("tv", "")
-            nombre_via = dir_info.get("nv", "")
-
-            # Información interior
-            loint = lourb.get("loint", {})
-            escalera = loint.get("es", "")
-            planta = loint.get("pt", "")
-            puerta = loint.get("pu", "")
-
-            # Construir dirección completa
-            direccion_partes = []
-            if tipo_via and nombre_via:
-                direccion_partes.append(f"{tipo_via} {nombre_via}")
-            if escalera:
-                direccion_partes.append(f"Escalera {escalera}")
-            if planta:
-                direccion_partes.append(f"Planta {planta}")
-            if puerta:
-                direccion_partes.append(f"Puerta {puerta}")
-
-            direccion_completa = ", ".join(direccion_partes)
-
-            return {
-                "referencia_catastral": referencia_completa,
-                "subparcela": car,
-                "uso": uso,
-                "superficie": superficie,
-                "antiguedad": antiguedad,
-                "coeficiente_participacion": coeficiente,
-                "direccion": direccion_completa,
-                "provincia": f"{provincia_nombre} ({provincia_codigo})",
-                "municipio": f"{municipio_nombre} ({municipio_codigo})",
-                "escalera": escalera,
-                "planta": planta,
-                "puerta": puerta,
-                "datos_raw": rcdnp_data,
-            }
-
-        except Exception as e:
-            log_failure(
-                logger,
-                logging.WARNING,
-                self.settings.log_sensitive_data,
-                "Error procesando inmueble oficial",
-                e,
-            )
-            return None
