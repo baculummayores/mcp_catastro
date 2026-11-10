@@ -139,3 +139,44 @@ def test_mcp_search_contracts(monkeypatch):
             assert "18100" in summary.structured_content["resumen"]
 
     asyncio.run(run())
+
+
+def test_street_refinement_keeps_number_from_original_text(monkeypatch):
+    from services.catastro_service import CatastroService
+    from tests.test_address import street_error
+    from tests.test_catastro_responses import fixture
+
+    calls = []
+
+    async def request(self, endpoint, params):
+        calls.append((endpoint, params))
+        if endpoint.endswith("ObtenerMunicipios"):
+            return fixture("municipalities")
+        if endpoint.endswith("ObtenerCallejero"):
+            if params["NomVia"] != "REYES CATOLICOS":
+                return street_error()
+            return fixture("streets")
+        assert params["Calle"] == "REYES CATOLICOS"
+        assert params["Numero"] == "6"
+        assert params["Sigla"] == "CL"
+        return fixture("address")
+
+    monkeypatch.setattr(CatastroService, "_request", request)
+
+    async def run():
+        async with Client(app) as client:
+            arguments = {"direccion_completa": "CALLE de los REYES CATOLICOS 6, ARMILLA, GRANADA"}
+            result = await client.call_tool("buscar_catastro_por_direccion", arguments)
+            assert result.is_error is False
+            assert result.structured_content["estado_consulta"] == "requiere_seleccion"
+            assert all(not endpoint.endswith("Consulta_DNPLOC") for endpoint, _ in calls)
+            choice = result.structured_content["candidatos"][0]
+            result = await client.call_tool(
+                "buscar_catastro_por_direccion",
+                {**arguments, "nombre_via": choice["nombre"], "tipo_via": choice["tipo_via"]},
+            )
+            assert result.is_error is False
+            assert result.structured_content["estado_consulta"] == "exitosa"
+            assert result.structured_content["total_inmuebles"] == 22
+
+    asyncio.run(run())
