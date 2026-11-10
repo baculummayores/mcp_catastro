@@ -89,6 +89,16 @@ Se reintentan HTTP 429/500/502/503/504 y fallos de transporte; no errores funcio
 
 ## Pruebas y despliegue
 
+Street searches try the original name first. Only when it has no matches
+(provider code `10` or an empty street list), they try up to two variants of
+leading `de`, `del`, `de la`, `de los`, `de las` or `de el`. Articles are kept in
+the first variant (`de los Olmos` → `los Olmos` → `Olmos`); interior words and
+unprefixed articles are preserved. Searches stop at the first nonempty street
+list. Fallback and partial-name matches always return street candidates for
+explicit selection, even when only one is found. Only a unique original exact
+name and matching road type can proceed to the house-number query. Code `10`
+is reported as `sin_datos`, with the official error detail retained.
+
 ```sh
 uv run --locked pytest -q
 uv run --locked black --check mcp_server.py smoke_catastro.py config models services tests/test_*.py

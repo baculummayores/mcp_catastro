@@ -267,7 +267,7 @@ class CatastroService:
         codes = {error["codigo"] for error in errors}
         status = (
             "sin_datos"
-            if codes <= {"5", "16"}
+            if codes <= {"5", "10", "16"}
             else "error_formato" if codes <= {"4", "76", "77"} else "error"
         )
         return CatastroResponse(
@@ -577,30 +577,47 @@ class CatastroService:
                 "GLORIETA": "GL",
             }
             tipo_via = types.get(self._canonical(tipo_via), tipo_via.upper())
-            raw = await self._request(
-                CatastroEndpoints.CONSULTA_VIA,
-                {
-                    "Provincia": provincia,
-                    "Municipio": municipio,
-                    "TipoVia": tipo_via,
-                    "NomVia": nombre_via,
-                },
-            )
-            root = self._root(raw)
-            failure = self._provider_error(root, "BUSQUEDA_DIRECCION")
-            if failure:
-                failure.datos_raw = raw if incluir_raw else None
-                return failure
-            streets = [
-                CandidatoCallejero(
-                    tipo="via",
-                    nombre=c["dir"]["nv"],
-                    codigo=str(c["dir"].get("cv", "")),
-                    tipo_via=c["dir"].get("tv"),
+            # Only retry leading particles after no matches. Preserve interior
+            # words and require confirmation of every fallback result.
+            original_name = nombre_via.strip()
+            names = self._street_name_variants(original_name)
+            for index, query_name in enumerate(names):
+                raw = await self._request(
+                    CatastroEndpoints.CONSULTA_VIA,
+                    {
+                        "Provincia": provincia,
+                        "Municipio": municipio,
+                        "TipoVia": tipo_via,
+                        "NomVia": query_name,
+                    },
                 )
-                for c in as_list(root.get("callejero", {}).get("calle"))
+                root = self._root(raw)
+                failure = self._provider_error(root, "BUSQUEDA_DIRECCION")
+                if failure:
+                    if index + 1 < len(names) and {
+                        error["codigo"] for error in failure.errores_origen
+                    } == {"10"}:
+                        continue
+                    failure.datos_raw = raw if incluir_raw else None
+                    return failure
+                streets = [
+                    CandidatoCallejero(
+                        tipo="via",
+                        nombre=c["dir"]["nv"],
+                        codigo=str(c["dir"].get("cv", "")),
+                        tipo_via=c["dir"].get("tv"),
+                    )
+                    for c in as_list(root.get("callejero", {}).get("calle"))
+                ]
+                if streets or index + 1 == len(names):
+                    break
+            exact = [
+                street
+                for street in streets
+                if self._canonical(street.nombre) == self._canonical(original_name)
+                and (not tipo_via or street.tipo_via == tipo_via)
             ]
-            selected = self._select_candidate(streets, nombre_via)
+            selected = exact[0] if index == 0 and len(exact) == 1 else None
             if selected is None:
                 return self._candidates(
                     streets,
@@ -635,6 +652,22 @@ class CatastroService:
             return result
         except Exception as exc:
             return self._error("BUSQUEDA_DIRECCION", exc)
+
+    @staticmethod
+    def _street_name_variants(name: str) -> list[str]:
+        """Try the original first, then at most two leading-particle variants."""
+        names = [name]
+        match = re.match(r"^(de|del)\s+(.+)$", name, re.IGNORECASE)
+        if match:
+            remainder = match[2]
+            with_article = f"el {remainder}" if match[1].lower() == "del" else remainder
+            names.append(with_article)
+            without_article = re.sub(
+                r"^(?:el|la|los|las)\s+", "", with_article, count=1, flags=re.IGNORECASE
+            )
+            if without_article != with_article:
+                names.append(without_article)
+        return names
 
     @staticmethod
     def _canonical(value: str) -> str:

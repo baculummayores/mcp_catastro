@@ -80,6 +80,7 @@ async def test_xml_matches_json():
         ("4", "error_formato"),
         ("76", "error_formato"),
         ("5", "sin_datos"),
+        ("10", "sin_datos"),
         ("16", "sin_datos"),
         ("99", "error"),
     ],
