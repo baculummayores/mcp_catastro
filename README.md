@@ -6,6 +6,8 @@ Python 3.14, MCP Python SDK 2.x, transporte stdio. Versión de aplicación y con
 
 ## Instalación
 
+Requiere `uv>=0.13.7`.
+
 ```sh
 uv sync --locked
 uv run --locked python mcp_server.py

@@ -10,9 +10,10 @@ if (-not (Test-Path "mcp_server.py") -or -not (Test-Path "uv.lock")) {
     exit 1
 }
 
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Host "📦 Instalando uv 0.9.7..." -ForegroundColor Yellow
-    python -m pip install "uv==0.9.7"
+if (-not (Get-Command uv -ErrorAction SilentlyContinue) -or
+    [version]((uv --version).Split()[1]) -lt [version]"0.13.7") {
+    Write-Host "📦 Instalando uv 0.13.7..." -ForegroundColor Yellow
+    python -m pip install "uv==0.13.7"
 }
 
 Write-Host "🔒 Sincronizando exactamente uv.lock..." -ForegroundColor Yellow
